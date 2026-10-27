@@ -1,0 +1,56 @@
+# git-cliff configuration: https://git-cliff.org/docs/configuration
+
+[changelog]
+header = """
+# Changelog
+
+All notable changes to this project are documented here. The format follows
+[Conventional Commits](https://www.conventionalcommits.org) and versions follow
+[Semantic Versioning](https://semver.org).
+
+"""
+body = """
+{% if version %}\
+    ## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else %}\
+    ## [Unreleased]
+{% endif %}\
+{% for group, commits in commits | group_by(attribute="group") %}
+    ### {{ group | striptags | trim | upper_first }}
+    {% for commit in commits %}
+        - {% if commit.scope %}**{{ commit.scope }}:** {% endif %}\
+            {% if commit.breaking %}**BREAKING** {% endif %}\
+            {{ commit.message | upper_first }}\
+    {% endfor %}
+{% endfor %}
+"""
+trim = true
+
+[git]
+conventional_commits = true
+require_conventional = true
+split_commits = false
+protect_breaking_commits = true
+tag_pattern = "v[0-9].*"
+sort_commits = "oldest"
+commit_preprocessors = [
+    # GitHub merge commits aren't conventional; turn them into something the parsers skip.
+    { pattern = '^Merge (pull request|branch) .*', replace = "chore(merge): merge" },
+]
+commit_parsers = [
+    { message = "^chore\\((release|merge)\\)", skip = true },
+    { message = "^feat", group = "<!-- 0 -->Features" },
+    { message = "^fix", group = "<!-- 1 -->Bug Fixes" },
+    { message = "^perf", group = "<!-- 2 -->Performance" },
+    { message = "^refactor", group = "<!-- 3 -->Refactor" },
+    { message = "^doc", group = "<!-- 4 -->Documentation" },
+    { message = "^test", group = "<!-- 5 -->Testing" },
+    { message = "^(build|ci|chore|style)", group = "<!-- 6 -->Miscellaneous" },
+    { message = "^revert", group = "<!-- 7 -->Reverts" },
+]
+
+# Cargo semver: while 0.x, breaking changes bump the minor version and features the patch version.
+[bump]
+features_always_bump_minor = false
+breaking_always_bump_major = false
+initial_tag = "v0.1.0"

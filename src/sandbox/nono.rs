@@ -1,0 +1,178 @@
+use std::ffi::OsString;
+use std::path::PathBuf;
+
+use anyhow::Result;
+
+use super::{GeneratedFile, Launch, Request, Sandbox};
+use crate::config::discover::hash;
+use crate::config::model::NonoConfig;
+use crate::policy::{Access, Network};
+
+const DEFAULT_PROFILE: &str = "default";
+
+pub struct Nono {
+    pub options: NonoConfig,
+    pub runtime_dir: PathBuf,
+}
+
+impl Sandbox for Nono {
+    fn build(&self, request: &Request<'_>) -> Result<Launch> {
+        let base = self.options.profile.as_deref();
+        let mut files = Vec::new();
+        let mut args: Vec<OsString> = vec!["wrap".into()];
+
+        // nono has no flag for policy groups, so they need a generated profile.
+        if !self.options.groups.is_empty() {
+            let profile = serde_json::json!({
+                "extends": [base.unwrap_or(DEFAULT_PROFILE)],
+                "groups": { "include": self.options.groups },
+            });
+            let contents = serde_json::to_string_pretty(&profile)?;
+            let path = self
+                .runtime_dir
+                .join("profiles")
+                .join(format!("{}.json", &hash(contents.as_bytes())[..16]));
+            args.extend(["--profile".into(), path.clone().into()]);
+            files.push(GeneratedFile { path, contents });
+        } else if let Some(base) = base {
+            args.extend(["--profile".into(), base.into()]);
+        }
+        for extends in &self.options.extends {
+            args.extend(["--extends".into(), extends.into()]);
+        }
+
+        let policy = request.policy;
+        args.push("--allow-cwd".into());
+        for grant in &policy.grants {
+            let flag = match (grant.access, grant.file) {
+                (Access::Read, false) => "--read",
+                (Access::Write, false) => "--write",
+                (Access::ReadWrite, false) => "--allow",
+                (Access::Read, true) => "--read-file",
+                (Access::Write, true) => "--write-file",
+                (Access::ReadWrite, true) => "--allow-file",
+            };
+            args.extend([flag.into(), grant.path.clone().into()]);
+        }
+        if policy.network == Network::Block {
+            args.push("--block-net".into());
+        }
+        for (flag, ports) in [
+            ("--open-port", &policy.open_ports),
+            ("--listen-port", &policy.listen_ports),
+        ] {
+            for port in ports {
+                args.extend([flag.into(), port.to_string().into()]);
+            }
+        }
+        args.extend(policy.extra_args.iter().map(OsString::from));
+        args.extend(request.passthrough.iter().cloned());
+        args.push("--".into());
+        args.push(request.program.into());
+        args.extend(request.args.iter().cloned());
+
+        Ok(Launch {
+            program: "nono".into(),
+            args,
+            env: policy.env.clone(),
+            files,
+            cwd: request.cwd.to_path_buf(),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+    use crate::policy::{Grant, Policy, Source};
+
+    fn os(args: &[&str]) -> Vec<OsString> {
+        args.iter().map(OsString::from).collect()
+    }
+
+    fn build(options: NonoConfig, passthrough: &[&str]) -> Launch {
+        let mut policy = Policy::default();
+        policy.grant(Grant {
+            path: "/repo".into(),
+            access: Access::ReadWrite,
+            file: false,
+            pin: false,
+            source: Source::Builtin("project root"),
+        });
+        policy.grant(Grant {
+            path: "/home/me/.gitconfig".into(),
+            access: Access::Read,
+            file: true,
+            pin: false,
+            source: Source::Preset,
+        });
+        policy.network = Network::Block;
+        policy.open_ports = vec![3000];
+        policy.extra_args = vec!["--allow-gpu".into()];
+        let nono = Nono {
+            options,
+            runtime_dir: "/run/cb".into(),
+        };
+        nono.build(&Request {
+            policy: &policy,
+            passthrough: &os(passthrough),
+            program: "claude",
+            args: os(&["--model", "opus"]),
+            cwd: Path::new("/repo"),
+        })
+        .unwrap()
+    }
+
+    fn args(launch: &Launch) -> Vec<String> {
+        launch
+            .args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn maps_policy_to_flags() {
+        let launch = build(
+            NonoConfig {
+                profile: Some("claude-code".into()),
+                extends: vec!["wsl".into()],
+                groups: vec![],
+            },
+            &["--read", "/tmp/x"],
+        );
+        assert_eq!(launch.program, "nono");
+        assert_eq!(
+            args(&launch).join(" "),
+            "wrap --profile claude-code --extends wsl --allow-cwd --allow /repo \
+             --read-file /home/me/.gitconfig --block-net --open-port 3000 --allow-gpu \
+             --read /tmp/x -- claude --model opus"
+        );
+        assert!(launch.files.is_empty());
+    }
+
+    #[test]
+    fn groups_generate_profile_extending_base() {
+        let launch = build(
+            NonoConfig {
+                profile: Some("claude-code".into()),
+                groups: vec!["node_runtime".into()],
+                ..Default::default()
+            },
+            &[],
+        );
+        let [file] = &launch.files[..] else {
+            panic!("expected one file")
+        };
+        assert!(file.path.starts_with("/run/cb/profiles"));
+        let profile: serde_json::Value = serde_json::from_str(&file.contents).unwrap();
+        assert_eq!(profile["extends"], serde_json::json!(["claude-code"]));
+        assert_eq!(
+            profile["groups"]["include"],
+            serde_json::json!(["node_runtime"])
+        );
+        assert_eq!(args(&launch)[2], file.path.to_string_lossy());
+    }
+}

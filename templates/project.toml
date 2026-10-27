@@ -1,0 +1,38 @@
+# cb (clankerbox) project config. Commit this file to share it with your team; put personal tweaks
+# in .clankerbox.local.toml. Changes must be re-approved with `cb trust`.
+# Schema: `cb schema`. Inspect the result: `cb show`.
+
+# Agent to run by default in this project (override with `-A <agent>`).
+# agent = "claude"
+
+# Stop looking for config files in parent directories, and make this directory the project
+# root (the directory the agent can read and write).
+# root = true
+
+# Variables for paths below, referenced as ${name}. Users can override them in their global
+# config, in .clankerbox.local.toml, or with CLANKERBOX_VAR_<name>=... in the environment.
+# Built-in: ${project_root}, ${config_dir}, ${home}, ${cwd}, ${env:NAME}, ${name:-fallback}.
+[vars]
+# projects = ".."
+
+[sandbox]
+# Extra access, relative to this file. Directories and single files both work.
+# read = ["${projects}/frontend"]
+# allow = []
+# write = []
+# read_commands = []        # make the directory of a command on $PATH readable
+
+# network = "allow"         # or "block"
+# open_ports = [3000]
+# listen_ports = []
+# env = { RUST_LOG = "debug" }
+# extra_args = []           # raw arguments for the sandbox backend
+
+[sandbox.nono]
+# profile = "..."          # default for agents that don't set their own
+# extends = []
+# groups = ["node_runtime"] # see `nono profile groups`
+
+# Per-agent settings.
+# [agents.claude]
+# args = ["--model", "opus"]

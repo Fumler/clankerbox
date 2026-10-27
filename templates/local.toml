@@ -1,0 +1,7 @@
+# Personal cb (clankerbox) config for this project; excluded from git. Same format as
+# .clankerbox.toml, applied after it. Variables set here override the project's defaults.
+
+[vars]
+
+[sandbox]
+# read = []

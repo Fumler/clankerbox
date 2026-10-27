@@ -1,0 +1,23 @@
+# Built-in agent presets. The global config and project files can override any of these
+# fields or define new agents, optionally with `inherits = "<preset>"`.
+
+agent = "claude"
+
+[agents.claude]
+kind = "claude"
+command = "claude"
+sandbox.nono.profile = "claude-code"
+
+[agents.codex]
+command = "codex"
+
+[agents.omp]
+command = "omp"
+sandbox.nono.profile = "omp"
+
+[agents.opencode]
+command = "opencode"
+
+[agents.pi]
+command = "pi"
+sandbox.nono.profile = "pi"

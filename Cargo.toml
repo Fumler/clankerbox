@@ -1,0 +1,45 @@
+[package]
+name = "clankerbox"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+description = "Project-aware sandbox wrapper for AI coding agents"
+license = "MIT"
+readme = "README.md"
+keywords = ["sandbox", "ai", "agent", "nono", "cli"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "cb"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
+rustix = { version = "1", features = ["process"] }
+schemars = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+strsim = "0.11"
+toml = "1"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Doc comments double as `--help` and JSON Schema text, where backticks would show literally.
+doc_markdown = "allow"
