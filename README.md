@@ -57,6 +57,8 @@ Recognised anywhere before a lone `--`:
 | `-C <dir>` | Run as if started in `<dir>` |
 | `--no-project` | Ignore project config files |
 | `--unsandboxed` | Run without a sandbox (or set `sandbox.backend = "none"`) |
+| `--dry-run` | Print the command instead of running it |
+| `--nono-<flag>` | Pass `--<flag>` to nono, for flags cb uses itself, e.g. `--nono-dry-run` |
 
 Other arguments before `--` go to nono verbatim, e.g. `--allow ./dir`. Arguments after `--` go to
 the agent.

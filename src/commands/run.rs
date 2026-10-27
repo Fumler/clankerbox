@@ -17,6 +17,15 @@ use crate::sandbox;
 pub fn run(args: &RunArgs) -> Result<Infallible> {
     let session = Session::open(&args.global)?;
     let resolved = session.resolve()?;
+    if args.global.dry_run {
+        for warning in &resolved.warnings {
+            warn(warning);
+        }
+        let launch = session.launch(&resolved, &args.sandbox, &args.agent_args)?;
+        launch.write_files()?;
+        println!("{}", launch.display_shell());
+        std::process::exit(0);
+    }
     sandbox::backend(&resolved, &session.dirs)
         .preflight(&mut |question| interactive().then(|| confirm(question).unwrap_or(false)))?;
     ensure_trusted(&session, &resolved)?;

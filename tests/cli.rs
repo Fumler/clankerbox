@@ -461,3 +461,35 @@ fn missing_nono_profile_suggests_pull() {
         .failure()
         .stderr(predicate::str::contains("nono profile `custom` not found"));
 }
+
+#[test]
+fn dry_run_prints_command_without_running() {
+    let env = nclaude_env();
+    let repo = env.path("home/repo");
+    env.write("home/repo/.clankerbox.toml", "");
+    let out = env.stdout(&["--dry-run", "--read", "../x y", "--", "--resume", "id"]);
+    assert_eq!(
+        out,
+        format!(
+            "HERDR_AGENT=claude nono wrap --profile nclaude --allow-cwd --allow {} \
+             --read '../x y' -- claude --resume id\n",
+            repo.display()
+        )
+    );
+
+    let other = env.path("home/frontend");
+    let out = env.stdout(&["--dry-run", "-C", other.to_str().unwrap()]);
+    assert!(
+        out.starts_with(&format!("cd {} && ", other.display())),
+        "{out}"
+    );
+}
+
+#[test]
+fn nono_dry_run_passes_through() {
+    let env = Env::new();
+    let out = env.stdout(&["--dry-run", "--nono-dry-run"]);
+    assert!(out.contains(" --dry-run -- claude"), "{out}");
+    let out = env.stdout(&["--nono-dry-run"]);
+    assert!(out.contains("--dry-run\n--\nclaude\n"), "{out}");
+}

@@ -71,11 +71,16 @@ pub fn backend(resolved: &Resolved, dirs: &Dirs) -> Box<dyn Sandbox> {
 }
 
 impl Launch {
-    pub fn exec(self) -> Result<Infallible> {
+    pub fn write_files(&self) -> Result<()> {
         for file in &self.files {
             write_private(&file.path, &file.contents)
                 .with_context(|| format!("cannot write {}", file.path.display()))?;
         }
+        Ok(())
+    }
+
+    pub fn exec(self) -> Result<Infallible> {
+        self.write_files()?;
         let err = Command::new(&self.program)
             .args(&self.args)
             .envs(&self.env)
@@ -85,6 +90,24 @@ impl Launch {
     }
 
     /// Shell-quoted, for display only.
+    /// Copy-pasteable shell form, including env vars and a `cd` when `cwd` isn't the current dir.
+    pub fn display_shell(&self) -> String {
+        let mut parts = Vec::new();
+        if std::env::current_dir().ok().as_deref() != Some(self.cwd.as_path()) {
+            parts.push(format!(
+                "cd {} &&",
+                shell_quote(&self.cwd.to_string_lossy())
+            ));
+        }
+        parts.extend(
+            self.env
+                .iter()
+                .map(|(k, v)| format!("{k}={}", shell_quote(v))),
+        );
+        parts.push(self.display_command());
+        parts.join(" ")
+    }
+
     pub fn display_command(&self) -> String {
         std::iter::once(&self.program)
             .chain(&self.args)

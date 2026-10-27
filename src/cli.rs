@@ -14,9 +14,10 @@ use clap_complete::Shell;
 ///
 ///   cb [OPTIONS | SANDBOX_ARGS]... [-- AGENT_ARGS...]
 ///
-/// OPTIONS (-A, -p, --nono-profile, -C, --no-project, --unsandboxed) are recognised anywhere
+/// OPTIONS (-A, -p, --nono-profile, -C, --no-project, --unsandboxed, --dry-run) are recognised anywhere
 /// before a lone `--`; every other argument there is passed to the sandbox backend (e.g.
-/// `--allow ./dir` for nono). Everything after `--` is passed to the agent.
+/// `--allow ./dir` for nono). `--nono-<flag>` passes `--<flag>` to nono, for flags cb uses itself
+/// (e.g. `--nono-dry-run`). Everything after `--` is passed to the agent.
 #[derive(Debug, Parser)]
 #[command(name = "cb", version, verbatim_doc_comment)]
 pub struct Cli {
@@ -46,6 +47,9 @@ pub struct GlobalOpts {
     /// Run the agent without any sandbox. For debugging.
     #[arg(long, global = true)]
     pub unsandboxed: bool,
+    /// Print the command that would run instead of running it.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -181,7 +185,11 @@ pub fn split_run_args(args: impl IntoIterator<Item = OsString>) -> Result<RunArg
             "-C" => g.dir = Some(value()?.into()),
             "--no-project" => g.no_project = true,
             "--unsandboxed" => g.unsandboxed = true,
-            _ => run.sandbox.push(arg),
+            "--dry-run" => g.dry_run = true,
+            _ => match text.strip_prefix("--nono-") {
+                Some(rest) => run.sandbox.push(format!("--{rest}").into()),
+                None => run.sandbox.push(arg),
+            },
         }
     }
     Ok(run)
@@ -230,6 +238,24 @@ mod tests {
         assert!(g.no_project);
         assert_eq!(run.sandbox, os(&["--read", "x", "--allow", "./d"]));
         assert_eq!(run.agent_args, os(&["--model", "--", "-p"]));
+    }
+
+    #[test]
+    fn nono_prefix_passes_flags_through() {
+        let run = split(&[
+            "--nono-dry-run",
+            "--nono-log-file=x",
+            "--nono-theme",
+            "latte",
+        ]);
+        assert_eq!(
+            run.sandbox,
+            os(&["--dry-run", "--log-file=x", "--theme", "latte"])
+        );
+        assert!(!run.global.dry_run);
+        let run = split(&["--nono-profile", "p"]);
+        assert_eq!(run.global.nono_profile.as_deref(), Some("p"));
+        assert_eq!(run.sandbox, Vec::<OsString>::new());
     }
 
     #[test]
