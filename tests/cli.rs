@@ -6,8 +6,17 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::TempDir;
 
-/// Prints its arguments one per line, then `CB_TEST_ENV` and the working directory.
-const STUB: &str = "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done\nprintf 'env=%s\\n' \"$CB_TEST_ENV\"\nprintf 'cwd=%s\\n' \"$PWD\"\n";
+/// Prints its arguments one per line, then `CB_TEST_ENV`, the agent variables the nclaude-style
+/// config sets (when set), and the working directory.
+const STUB: &str = r#"#!/bin/sh
+for a in "$@"; do printf '%s\n' "$a"; done
+printf 'env=%s\n' "$CB_TEST_ENV"
+for var in HERDR_AGENT CLAUDE_CONFIG_DIR; do
+  eval "value=\${$var-}"
+  [ -n "$value" ] && printf '%s=%s\n' "$var" "$value"
+done
+printf 'cwd=%s\n' "$PWD"
+"#;
 
 struct Env {
     tmp: TempDir,
@@ -224,53 +233,138 @@ fn unknown_subcommand_and_schema() {
     assert!(schema["properties"]["sandbox"].is_object());
 }
 
-const NCLAUDE_LIKE: &str = r#"
+/// The README's migration config for the `nclaude` / `nclaude-personal` / `npi` shell wrappers,
+/// without the `[when.wsl]` section so results don't depend on the host.
+const NCLAUDE_CONFIG: &str = r#"
 [agents.claude]
 sandbox.nono.profile = "nclaude"
-sandbox.env = { CB_TEST_ENV = "claude" }
+sandbox.env = { HERDR_AGENT = "claude" }
 
 [agents.pi]
 sandbox.nono.profile = "npi"
 
+[agents.omp]
+sandbox.nono.profile = "nomp"
+
+[profiles.personal]
+sandbox.env = { CLAUDE_CONFIG_DIR = "${home}/.claude-personal" }
+
 [profiles.personal.agents.claude]
 sandbox.nono.profile = "nclaude-personal"
-sandbox.env = { CB_TEST_ENV = "${home}/.claude-personal" }
 
 [profiles.personal.agents.pi]
 sandbox.nono.profile = "npi-personal"
 "#;
 
-#[test]
-fn global_defaults_and_personal_profile() {
+fn nclaude_env() -> Env {
     let env = Env::new();
-    env.write("config/clankerbox/config.toml", NCLAUDE_LIKE);
-    fs::create_dir_all(env.path("home/repo/scratch")).unwrap();
+    env.write("config/clankerbox/config.toml", NCLAUDE_CONFIG);
+    env
+}
 
-    let out = env.stdout(&["--allow", "./scratch"]);
-    assert!(out.starts_with("wrap\n--profile\nnclaude\n"), "{out}");
-    assert!(out.contains("--allow\n./scratch\n--\nclaude\n"), "{out}");
-    assert!(out.contains("env=claude\n"), "{out}");
+/// `nclaude` → `cb`
+#[test]
+fn replaces_nclaude() {
+    let env = nclaude_env();
+    let repo = env.path("home/repo");
+    let out = env.stdout(&[]);
+    assert_eq!(
+        lines(&out),
+        [
+            "wrap",
+            "--profile",
+            "nclaude",
+            "--allow-cwd",
+            "--allow",
+            repo.to_str().unwrap(),
+            "--",
+            "claude",
+            "env=",
+            "HERDR_AGENT=claude",
+            &format!("cwd={}", repo.display()),
+        ]
+    );
+}
 
-    let out = env.stdout(&["--allow", "./scratch", "-p", "personal", "--", "--resume"]);
-    assert!(
-        out.starts_with("wrap\n--profile\nnclaude-personal\n"),
-        "{out}"
-    );
-    assert!(
-        out.contains("--allow\n./scratch\n--\nclaude\n--resume\n"),
-        "{out}"
-    );
+/// `nclaude-personal` → `cb -p personal`
+#[test]
+fn replaces_nclaude_personal() {
+    let env = nclaude_env();
+    let repo = env.path("home/repo");
     let personal = env.path("home/.claude-personal");
-    assert!(
-        out.contains(&format!("env={}\n", personal.display())),
-        "{out}"
+    let out = env.stdout(&["-p", "personal"]);
+    assert_eq!(
+        lines(&out),
+        [
+            "wrap",
+            "--profile",
+            "nclaude-personal",
+            "--allow-cwd",
+            "--allow",
+            repo.to_str().unwrap(),
+            "--",
+            "claude",
+            "env=",
+            "HERDR_AGENT=claude",
+            &format!("CLAUDE_CONFIG_DIR={}", personal.display()),
+            &format!("cwd={}", repo.display()),
+        ]
     );
+}
 
-    let out = env.stdout(&["-p", "personal", "--nono-profile", "other"]);
-    assert!(out.starts_with("wrap\n--profile\nother\n"), "{out}");
+/// `nclaude --allow ./some-dir --read ../some-other-dir -- --resume <id>`
+/// → the same arguments to `cb`
+#[test]
+fn replaces_nclaude_with_one_off_grants_and_agent_args() {
+    let env = nclaude_env();
+    let repo = env.path("home/repo");
+    let out = env.stdout(&[
+        "--allow",
+        "./some-dir",
+        "--read",
+        "../some-other-dir",
+        "--",
+        "--resume",
+        "some-claude-session-id",
+    ]);
+    assert_eq!(
+        lines(&out),
+        [
+            "wrap",
+            "--profile",
+            "nclaude",
+            "--allow-cwd",
+            "--allow",
+            repo.to_str().unwrap(),
+            "--allow",
+            "./some-dir",
+            "--read",
+            "../some-other-dir",
+            "--",
+            "claude",
+            "--resume",
+            "some-claude-session-id",
+            "env=",
+            "HERDR_AGENT=claude",
+            &format!("cwd={}", repo.display()),
+        ]
+    );
+}
+
+/// `npi` / `npi-personal`, plus one-off nono profile overrides and typos.
+#[test]
+fn replaces_npi_and_reports_unknown_profiles() {
+    let env = nclaude_env();
+    let out = env.stdout(&["-A", "pi"]);
+    assert!(out.starts_with("wrap\n--profile\nnpi\n"), "{out}");
+    assert!(out.contains("--\npi\n"), "{out}");
 
     let out = env.stdout(&["-A", "pi", "-p", "personal"]);
     assert!(out.starts_with("wrap\n--profile\nnpi-personal\n"), "{out}");
+    assert!(out.contains("CLAUDE_CONFIG_DIR="), "{out}");
+
+    let out = env.stdout(&["-p", "personal", "--nono-profile", "other"]);
+    assert!(out.starts_with("wrap\n--profile\nother\n"), "{out}");
 
     env.cmd(&["-p", "nope"])
         .assert()
