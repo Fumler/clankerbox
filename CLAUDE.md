@@ -14,7 +14,8 @@ nix develop path:. -c cargo fmt
 nix build path:.
 ```
 
-`path:.` is needed because nix only sees git-tracked files otherwise.
+`path:.` is needed because nix only sees git-tracked files otherwise. The `.envrc` loads the same
+shell via direnv for humans; tool shells don't load it, so keep using `nix develop`.
 
 ## Rules
 
