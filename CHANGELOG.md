@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format follows
 [Conventional Commits](https://www.conventionalcommits.org) and versions follow
 [Semantic Versioning](https://semver.org).
 
+## [1.1.0] - 2026-10-27
+
+### Features
+
+- **cli:** Colour terminal output and --help
+
+### Miscellaneous
+
+- **dev:** Add direnv .envrc for the dev shell
 ## [1.0.0] - 2026-10-27
 
 ### Features
