@@ -28,7 +28,7 @@ Recognised anywhere before a lone `--`:
 | Option | |
 |---|---|
 | `-A/--agent <name>` | Run a different agent |
-| `-p/--profile <name>` | Apply a [profile](#profiles) (repeatable) |
+| `-p/--profile <name>` | Apply a [profile](#agents-and-profiles) (repeatable) |
 | `--nono-profile <name>` | Override the configured nono profile |
 | `-C <dir>` | Run as if started in `<dir>` |
 | `--no-project` | Ignore project config files |
