@@ -415,3 +415,14 @@ fn symlinked_home_is_still_never_granted() {
     let report: serde_json::Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(report["policy"]["grants"], serde_json::json!([]));
 }
+
+#[test]
+fn init_lists_cache_write_grants() {
+    let env = Env::new();
+    env.write("home/repo/Cargo.toml", "");
+    env.cmd(&["init"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("detected rust"))
+        .stderr(predicate::str::contains("rust  rw  ~/.cargo/registry"));
+}

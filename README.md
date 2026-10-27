@@ -45,7 +45,7 @@ cb show                             # what would run, and why
 
 | Subcommand | |
 |---|---|
-| `init [--local]` | Create `.clankerbox.toml`, or a personal `.clankerbox.local.toml` added to `.git/info/exclude` |
+| `init [--local]` | Create `.clankerbox.toml` with nono groups for detected toolchains, or a personal `.clankerbox.local.toml` added to `.git/info/exclude` |
 | `trust` / `untrust` | Approve or revoke the project config files that apply here |
 | `show [--json] [ARGS]` | Config files, grants with their source, and the final command |
 | `agents` | Available agents (`*` marks the default) and profiles |
@@ -53,6 +53,27 @@ cb show                             # what would run, and why
 | `doctor` | Check nono, the agent command, profiles and config files |
 | `schema` | JSON Schema for config files |
 | `completions <shell>` | Shell completions |
+
+## Defaults
+
+With no config, cb grants only:
+
+- **Base policy:** the agent's nono profile, e.g. `claude-code` for `claude`, `pi` for `pi` and
+  `omp` for `omp`. `codex` and `opencode` have none, so they get nono's built-in defaults.
+- **Project root:** read-write, unless it is `$HOME` or contains it. This is the git toplevel,
+  otherwise the current directory.
+- **Current directory:** `--allow-cwd`, at the level the profile sets.
+- **Linked git worktrees:** read-write on the shared git directory, and for `claude` also the main
+  worktree's `.claude/settings.local.json`.
+
+Network and environment variables follow the nono profile, which by default allows outbound
+network and passes the environment through. nono runs in supervised mode (`nono run`). Project
+config files only take effect after `cb trust`. `cb show` lists exactly what a run grants.
+
+`cb init` adds only what detected toolchains need: nono
+[groups](https://nono.sh/docs/cli/features/profiles-groups) (e.g. `rust_runtime` for a
+`Cargo.toml`) and write access to their shared package caches (e.g. `~/.cargo/registry`), which
+it warns about. All other settings in the generated file are commented out.
 
 ## Configuration
 
