@@ -1,11 +1,13 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 
-use super::{GeneratedFile, Launch, Request, Sandbox};
+use super::{Confirm, GeneratedFile, Launch, Request, Sandbox};
 use crate::config::discover::hash;
 use crate::config::model::{NonoConfig, NonoMode};
+use crate::context;
 use crate::policy::{Access, Network};
 
 const DEFAULT_PROFILE: &str = "default";
@@ -15,7 +17,57 @@ pub struct Nono {
     pub runtime_dir: PathBuf,
 }
 
+/// Registry pack providing a nono profile.
+fn registry_pack(profile: &str) -> Option<&'static str> {
+    match profile {
+        "claude-code" | "claude" => Some("nolabs-ai/claude"),
+        "pi" => Some("nolabs-ai/pi"),
+        "omp" => Some("nolabs-ai/omp"),
+        _ => None,
+    }
+}
+
+fn profile_installed(profile: &str) -> bool {
+    Command::new("nono")
+        .args(["profile", "show", profile])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 impl Sandbox for Nono {
+    fn preflight(&self, confirm: Confirm<'_>) -> Result<()> {
+        if context::which("nono").is_none() {
+            bail!("nono not found on $PATH; install it from https://nono.sh");
+        }
+        let Some(profile) = self.options.profile.as_deref() else {
+            return Ok(());
+        };
+        if profile.contains('/') || profile_installed(profile) {
+            return Ok(());
+        }
+        let Some(pack) = registry_pack(profile) else {
+            bail!("nono profile `{profile}` not found (see `nono profile list`)");
+        };
+        let question =
+            format!("nono profile `{profile}` is not installed. Run `nono pull {pack}`?");
+        match confirm(&question) {
+            Some(true) => {
+                let status = Command::new("nono")
+                    .args(["pull", pack])
+                    .status()
+                    .context("cannot run nono pull")?;
+                if !status.success() {
+                    bail!("`nono pull {pack}` failed");
+                }
+                Ok(())
+            }
+            Some(false) => bail!("nono profile `{profile}` is not installed"),
+            None => bail!("nono profile `{profile}` is not installed; run `nono pull {pack}`"),
+        }
+    }
+
     fn build(&self, request: &Request<'_>) -> Result<Launch> {
         let base = self.options.profile.as_deref();
         let mut files = Vec::new();

@@ -6,8 +6,13 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::TempDir;
 
-/// Prints args, selected env vars and cwd, one per line.
+/// Prints args, selected env vars and cwd, one per line. `profile show` fails for profiles in
+/// `CB_STUB_MISSING`.
 const STUB: &str = r#"#!/bin/sh
+if [ "$1 $2" = "profile show" ]; then
+  case " $CB_STUB_MISSING " in *" $3 "*) exit 1 ;; esac
+  exit 0
+fi
 for a in "$@"; do printf '%s\n' "$a"; done
 printf 'env=%s\n' "$CB_TEST_ENV"
 for var in HERDR_AGENT CLAUDE_CONFIG_DIR; do
@@ -232,7 +237,7 @@ fn unknown_subcommand_and_schema() {
     assert!(schema["properties"]["sandbox"].is_object());
 }
 
-/// README migration config, minus `[when.wsl]`.
+/// Config replacing `nclaude`-style shell wrappers around `nono wrap`.
 const NCLAUDE_CONFIG: &str = r#"
 [agents.claude]
 sandbox.nono.profile = "nclaude"
@@ -425,4 +430,34 @@ fn init_lists_cache_write_grants() {
         .success()
         .stdout(predicate::str::contains("detected rust"))
         .stderr(predicate::str::contains("rust  rw  ~/.cargo/registry"));
+}
+
+#[test]
+fn missing_nono_is_a_clear_error() {
+    let env = Env::new();
+    fs::remove_file(env.path("bin/nono")).unwrap();
+    env.cmd(&[])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "nono not found on $PATH; install it from https://nono.sh",
+        ));
+    env.cmd(&["show"]).assert().success();
+}
+
+#[test]
+fn missing_nono_profile_suggests_pull() {
+    let env = Env::new();
+    env.cmd(&[])
+        .env("CB_STUB_MISSING", "claude-code")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "nono profile `claude-code` is not installed; run `nono pull nolabs-ai/claude`",
+        ));
+    env.cmd(&["--nono-profile", "custom"])
+        .env("CB_STUB_MISSING", "custom")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("nono profile `custom` not found"));
 }

@@ -12,10 +12,13 @@ use crate::config::discover::Layer;
 use crate::config::model::BackendKind;
 use crate::config::trust::TrustStore;
 use crate::policy::Source;
+use crate::sandbox;
 
 pub fn run(args: &RunArgs) -> Result<Infallible> {
     let session = Session::open(&args.global)?;
     let resolved = session.resolve()?;
+    sandbox::backend(&resolved, &session.dirs)
+        .preflight(&mut |question| interactive().then(|| confirm(question).unwrap_or(false)))?;
     ensure_trusted(&session, &resolved)?;
     for warning in &resolved.warnings {
         warn(warning);

@@ -48,7 +48,15 @@ pub struct GeneratedFile {
     pub contents: String,
 }
 
+/// Asks the user a yes/no question; `None` when not interactive.
+pub type Confirm<'a> = &'a mut dyn FnMut(&str) -> Option<bool>;
+
 pub trait Sandbox {
+    /// Checks (and with consent, fixes) the environment before a run.
+    fn preflight(&self, _confirm: Confirm<'_>) -> Result<()> {
+        Ok(())
+    }
+
     fn build(&self, request: &Request<'_>) -> Result<Launch>;
 }
 
