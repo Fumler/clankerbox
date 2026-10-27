@@ -34,7 +34,7 @@ protect_breaking_commits = true
 tag_pattern = "v[0-9].*"
 sort_commits = "oldest"
 commit_preprocessors = [
-    # GitHub merge commits aren't conventional; turn them into something the parsers skip.
+    # GitHub merge commits aren't conventional.
     { pattern = '^Merge (pull request|branch) .*', replace = "chore(merge): merge" },
 ]
 commit_parsers = [
@@ -49,7 +49,7 @@ commit_parsers = [
     { message = "^revert", group = "<!-- 7 -->Reverts" },
 ]
 
-# Cargo semver: while 0.x, breaking changes bump the minor version and features the patch version.
+# Cargo semver: in 0.x, breaking bumps minor.
 [bump]
 features_always_bump_minor = false
 breaking_always_bump_major = false
