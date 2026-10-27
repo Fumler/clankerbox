@@ -5,7 +5,7 @@ use anyhow::Result;
 
 use super::{GeneratedFile, Launch, Request, Sandbox};
 use crate::config::discover::hash;
-use crate::config::model::NonoConfig;
+use crate::config::model::{NonoConfig, NonoMode};
 use crate::policy::{Access, Network};
 
 const DEFAULT_PROFILE: &str = "default";
@@ -19,7 +19,11 @@ impl Sandbox for Nono {
     fn build(&self, request: &Request<'_>) -> Result<Launch> {
         let base = self.options.profile.as_deref();
         let mut files = Vec::new();
-        let mut args: Vec<OsString> = vec!["wrap".into()];
+        let subcommand = match self.options.mode.unwrap_or(NonoMode::Supervised) {
+            NonoMode::Supervised => "run",
+            NonoMode::Direct => "wrap",
+        };
+        let mut args: Vec<OsString> = vec![subcommand.into()];
 
         // nono has no flag for policy groups, so they need a generated profile.
         if !self.options.groups.is_empty() {
@@ -137,6 +141,7 @@ mod tests {
     fn maps_policy_to_flags() {
         let launch = build(
             NonoConfig {
+                mode: None,
                 profile: Some("claude-code".into()),
                 extends: vec!["wsl".into()],
                 groups: vec![],
@@ -146,11 +151,20 @@ mod tests {
         assert_eq!(launch.program, "nono");
         assert_eq!(
             args(&launch).join(" "),
-            "wrap --profile claude-code --extends wsl --allow-cwd --allow /repo \
+            "run --profile claude-code --extends wsl --allow-cwd --allow /repo \
              --read-file /home/me/.gitconfig --block-net --open-port 3000 --allow-gpu \
              --read /tmp/x -- claude --model opus"
         );
         assert!(launch.files.is_empty());
+
+        let direct = build(
+            NonoConfig {
+                mode: Some(NonoMode::Direct),
+                ..Default::default()
+            },
+            &[],
+        );
+        assert_eq!(args(&direct)[0], "wrap");
     }
 
     #[test]

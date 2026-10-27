@@ -107,6 +107,8 @@ pub enum Network {
 #[derive(Debug, Default, Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct NonoConfig {
+    /// Defaults to `supervised`.
+    pub mode: Option<NonoMode>,
     /// Base nono profile (name or path).
     pub profile: Option<String>,
     /// Additional base profiles, passed as `--extends`.
@@ -115,6 +117,15 @@ pub struct NonoConfig {
     /// Policy groups to include on top of the profile (see `nono profile groups`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum NonoMode {
+    /// `nono run`, with a supervisor process.
+    Supervised,
+    /// `nono wrap`, no nono process left.
+    Direct,
 }
 
 #[derive(Debug, Default, Clone, Deserialize, Serialize, JsonSchema)]

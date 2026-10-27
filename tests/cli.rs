@@ -6,8 +6,7 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::TempDir;
 
-/// Prints its arguments one per line, then `CB_TEST_ENV`, the agent variables the nclaude-style
-/// config sets (when set), and the working directory.
+/// Prints args, selected env vars and cwd, one per line.
 const STUB: &str = r#"#!/bin/sh
 for a in "$@"; do printf '%s\n' "$a"; done
 printf 'env=%s\n' "$CB_TEST_ENV"
@@ -101,7 +100,7 @@ fn runs_nono_with_project_grants_after_trust() {
     let repo = env.path("home/repo");
     let frontend = env.path("home/frontend");
     let expected = [
-        "wrap",
+        "run",
         "--profile",
         "claude-code",
         "--allow-cwd",
@@ -233,11 +232,11 @@ fn unknown_subcommand_and_schema() {
     assert!(schema["properties"]["sandbox"].is_object());
 }
 
-/// The README's migration config for the `nclaude` / `nclaude-personal` / `npi` shell wrappers,
-/// without the `[when.wsl]` section so results don't depend on the host.
+/// README migration config, minus `[when.wsl]`.
 const NCLAUDE_CONFIG: &str = r#"
 [agents.claude]
 sandbox.nono.profile = "nclaude"
+sandbox.nono.mode = "direct"
 sandbox.env = { HERDR_AGENT = "claude" }
 
 [agents.pi]
@@ -312,8 +311,7 @@ fn replaces_nclaude_personal() {
     );
 }
 
-/// `nclaude --allow ./some-dir --read ../some-other-dir -- --resume <id>`
-/// → the same arguments to `cb`
+/// `nclaude --allow … --read … -- --resume <id>` → same args to `cb`
 #[test]
 fn replaces_nclaude_with_one_off_grants_and_agent_args() {
     let env = nclaude_env();
@@ -351,16 +349,16 @@ fn replaces_nclaude_with_one_off_grants_and_agent_args() {
     );
 }
 
-/// `npi` / `npi-personal`, plus one-off nono profile overrides and typos.
+/// `npi` / `npi-personal`
 #[test]
 fn replaces_npi_and_reports_unknown_profiles() {
     let env = nclaude_env();
     let out = env.stdout(&["-A", "pi"]);
-    assert!(out.starts_with("wrap\n--profile\nnpi\n"), "{out}");
+    assert!(out.starts_with("run\n--profile\nnpi\n"), "{out}");
     assert!(out.contains("--\npi\n"), "{out}");
 
     let out = env.stdout(&["-A", "pi", "-p", "personal"]);
-    assert!(out.starts_with("wrap\n--profile\nnpi-personal\n"), "{out}");
+    assert!(out.starts_with("run\n--profile\nnpi-personal\n"), "{out}");
     assert!(out.contains("CLAUDE_CONFIG_DIR="), "{out}");
 
     let out = env.stdout(&["-p", "personal", "--nono-profile", "other"]);

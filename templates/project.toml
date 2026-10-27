@@ -29,6 +29,7 @@
 # extra_args = []           # raw arguments for the sandbox backend
 
 [sandbox.nono]
+# mode = "supervised"       # or "direct"
 # profile = "..."          # default for agents that don't set their own
 # extends = []
 # groups = ["node_runtime"] # see `nono profile groups`

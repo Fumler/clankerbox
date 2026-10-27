@@ -335,6 +335,9 @@ impl Builder {
         p.extra_args.extend(sandbox.extra_args.iter().cloned());
 
         let nono = &sandbox.nono;
+        if nono.mode.is_some() {
+            self.nono.mode = nono.mode;
+        }
         if nono.profile.is_some() {
             self.nono.profile.clone_from(&nono.profile);
         }

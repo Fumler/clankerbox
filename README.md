@@ -105,6 +105,7 @@ env = { RUST_LOG = "debug" }
 extra_args = []                          # raw backend arguments
 
 [sandbox.nono]
+mode = "supervised"                      # or "direct"
 extends = []
 groups = ["node_runtime"]                # `nono profile groups`
 
@@ -159,6 +160,9 @@ A repository's config can grant access to anything, so project files must be app
 
 ## nono backend
 
+- **[Execution mode](https://nono.sh/docs/cli/features/execution-modes):** `supervised`
+  (default, `nono run`) or `direct` (`nono wrap`, for tools like Herdr that need the agent as the
+  foreground process).
 - **Grants:** they become `--read`/`--write`/`--allow` (or the `-file` variants), `--block-net`,
   `--open-port` and `--listen-port`.
 - **Groups:** nono has no flag for policy groups, so cb writes a small profile that extends the
@@ -178,6 +182,7 @@ handling is built in.
 # ~/.config/clankerbox/config.toml
 [agents.claude]
 sandbox.nono.profile = "nclaude"
+sandbox.nono.mode = "direct"             # for Herdr
 sandbox.env = { HERDR_AGENT = "claude" }
 
 [agents.pi]
