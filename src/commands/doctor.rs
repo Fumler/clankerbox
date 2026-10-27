@@ -1,5 +1,6 @@
 use std::process::{Command, ExitCode};
 
+use anstream::println;
 use anyhow::Result;
 
 use super::Session;
@@ -7,6 +8,7 @@ use crate::cli::GlobalOpts;
 use crate::config::model::BackendKind;
 use crate::config::trust::TrustStore;
 use crate::context;
+use crate::style::{ERROR, OK};
 
 #[derive(Default)]
 struct Report {
@@ -17,14 +19,18 @@ struct Report {
 impl Report {
     fn ok(&mut self, message: impl std::fmt::Display) {
         self.passed += 1;
-        println!("✓ {message}");
+        println!("{OK}✓{OK:#} {message}");
     }
     fn fail(&mut self, message: impl std::fmt::Display) {
         self.failed += 1;
-        println!("✗ {message}");
+        println!("{ERROR}✗ {message}{ERROR:#}");
     }
     fn finish(&self) -> ExitCode {
-        println!("\n{} passed, {} failed", self.passed, self.failed);
+        let failed = if self.failed == 0 { OK } else { ERROR };
+        println!(
+            "\n{OK}{} passed{OK:#}, {failed}{} failed{failed:#}",
+            self.passed, self.failed
+        );
         if self.failed == 0 {
             ExitCode::SUCCESS
         } else {

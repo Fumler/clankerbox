@@ -3,6 +3,7 @@ use std::fs::File;
 use std::os::fd::{IntoRawFd, OwnedFd};
 use std::path::Path;
 
+use anstream::{eprintln, println};
 use anyhow::{Result, bail};
 
 use super::{Session, confirm, interactive, warn};
@@ -13,6 +14,7 @@ use crate::config::model::BackendKind;
 use crate::config::trust::TrustStore;
 use crate::policy::Source;
 use crate::sandbox;
+use crate::style::{self, DIM, ERROR, LABEL};
 
 pub fn run(args: &RunArgs) -> Result<Infallible> {
     let session = Session::open(&args.global)?;
@@ -34,7 +36,7 @@ pub fn run(args: &RunArgs) -> Result<Infallible> {
     }
     if resolved.backend == BackendKind::None {
         eprintln!(
-            "cb: WARNING: running {} WITHOUT a sandbox",
+            "cb: {ERROR}WARNING: running {} WITHOUT a sandbox{ERROR:#}",
             resolved.agent.command
         );
     }
@@ -91,11 +93,11 @@ fn ensure_trusted(session: &Session, resolved: &Resolved) -> Result<()> {
 fn review(layer: &Layer, resolved: &Resolved) {
     let path = layer.path.as_deref().unwrap_or(Path::new(""));
     eprintln!(
-        "\ncb: {path} is new or has changed:\n",
+        "\ncb: {LABEL}{path}{LABEL:#} is new or has changed:\n",
         path = path.display()
     );
     for line in layer.content.lines() {
-        eprintln!("  │ {line}");
+        eprintln!("  {DIM}│{DIM:#} {line}");
     }
     let source = Source::File(path.to_path_buf());
     let grants: Vec<_> = resolved
@@ -105,9 +107,14 @@ fn review(layer: &Layer, resolved: &Resolved) {
         .filter(|g| g.source == source)
         .collect();
     if !grants.is_empty() {
-        eprintln!("\n  grants:");
+        eprintln!("\n  {LABEL}grants:{LABEL:#}");
         for grant in grants {
-            eprintln!("    {} {}", grant.access, grant.path.display());
+            let access = style::access(grant.access);
+            eprintln!(
+                "    {access}{}{access:#} {}",
+                grant.access,
+                grant.path.display()
+            );
         }
     }
     eprintln!();

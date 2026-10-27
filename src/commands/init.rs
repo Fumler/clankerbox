@@ -3,6 +3,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 
+use anstream::{eprintln, println};
 use anyhow::{Context, Result, bail};
 
 use super::{Session, confirm, interactive, warn};
@@ -10,6 +11,8 @@ use crate::cli::GlobalOpts;
 use crate::config::discover::{LOCAL_FILE, Origin, PROJECT_FILE, load_file};
 use crate::config::trust::TrustStore;
 use crate::config::vars::Vars;
+use crate::policy::Access;
+use crate::style::{self, DIM, LABEL, OK};
 
 const PROJECT_TEMPLATE: &str = include_str!("../../templates/project.toml");
 const LOCAL_TEMPLATE: &str = include_str!("../../templates/local.toml");
@@ -24,7 +27,7 @@ pub fn init(opts: &GlobalOpts, local: bool, force: bool) -> Result<()> {
         let toolchains = detect_toolchains(cwd);
         if !toolchains.is_empty() {
             let names: Vec<_> = toolchains.iter().map(|t| t.name).collect();
-            println!("detected {}", names.join(", "));
+            println!("{LABEL}detected{LABEL:#} {}", names.join(", "));
         }
         report_cache_grants(&toolchains, &session);
         (PROJECT_FILE, project_template(&toolchains), Origin::Project)
@@ -61,7 +64,7 @@ pub fn init(opts: &GlobalOpts, local: bool, force: bool) -> Result<()> {
     let mut store = TrustStore::load(&session.dirs.state)?;
     store.trust(&layer);
     store.save()?;
-    println!("created {}", path.display());
+    println!("{OK}created{OK:#} {}", path.display());
     Ok(())
 }
 
@@ -261,10 +264,11 @@ fn report_cache_grants(toolchains: &[&Toolchain], session: &Session) {
         "write access to shared package caches; the agent can change packages your unsandboxed builds use:",
     );
     let width = rows.iter().map(|(name, _)| name.len()).max().unwrap_or(0);
+    let rw = style::access(Access::ReadWrite);
     for (name, path) in rows {
-        eprintln!("  {name:<width$}  rw  {path}");
+        eprintln!("  {name:<width$}  {rw}rw{rw:#}  {path}");
     }
-    eprintln!("  Remove entries from `allow` in {PROJECT_FILE} if unwanted.");
+    eprintln!("  {DIM}Remove entries from `allow` in {PROJECT_FILE} if unwanted.{DIM:#}");
 }
 
 fn display_home(path: &Path, home: &Path) -> String {

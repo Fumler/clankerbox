@@ -11,6 +11,7 @@ use std::ffi::OsString;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 
+use anstream::{eprint, eprintln};
 use anyhow::{Context, Result};
 
 use crate::cli::GlobalOpts;
@@ -19,6 +20,7 @@ use crate::config::model::{BackendKind, Platform};
 use crate::config::{self, Resolved};
 use crate::context::Dirs;
 use crate::sandbox::{self, Launch, Request};
+use crate::style::{LABEL, WARN};
 
 pub struct Session {
     pub dirs: Dirs,
@@ -92,7 +94,7 @@ impl Session {
 }
 
 pub fn warn(message: impl std::fmt::Display) {
-    eprintln!("cb: warning: {message}");
+    eprintln!("cb: {WARN}warning:{WARN:#} {message}");
 }
 
 pub fn interactive() -> bool {
@@ -101,7 +103,7 @@ pub fn interactive() -> bool {
 
 /// Ask a yes/no question on stderr; defaults to no.
 pub fn confirm(question: &str) -> Result<bool> {
-    eprint!("{question} [y/N] ");
+    eprint!("{LABEL}{question}{LABEL:#} [y/N] ");
     io::stderr().flush()?;
     let mut answer = String::new();
     io::stdin().lock().read_line(&mut answer)?;

@@ -1,12 +1,14 @@
 use std::env;
 use std::process::Command;
 
+use anstream::println;
 use anyhow::{Context, Result, bail};
 
 use super::Session;
 use crate::cli::GlobalOpts;
 use crate::config::discover::{Origin, load_file};
 use crate::config::trust::TrustStore;
+use crate::style::OK;
 
 pub fn edit(opts: &GlobalOpts, local: bool) -> Result<()> {
     let session = Session::open(opts)?;
@@ -46,6 +48,6 @@ pub fn edit(opts: &GlobalOpts, local: bool) -> Result<()> {
     let mut store = TrustStore::load(&session.dirs.state)?;
     store.trust(&layer);
     store.save()?;
-    println!("trusted {}", path.display());
+    println!("{OK}trusted{OK:#} {}", path.display());
     Ok(())
 }

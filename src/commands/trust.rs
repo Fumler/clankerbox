@@ -1,25 +1,28 @@
+use anstream::println;
 use anyhow::Result;
 
 use super::Session;
 use crate::cli::GlobalOpts;
 use crate::config::discover::Layer;
 use crate::config::trust::TrustStore;
+use crate::style::{OK, WARN};
 
 pub fn trust(opts: &GlobalOpts) -> Result<()> {
-    update(opts, "trusted", |store, layer| {
+    update(opts, "trusted", OK, |store, layer| {
         store.trust(layer);
         true
     })
 }
 
 pub fn untrust(opts: &GlobalOpts) -> Result<()> {
-    update(opts, "untrusted", TrustStore::untrust)
+    update(opts, "untrusted", WARN, TrustStore::untrust)
 }
 
 /// Apply `change` to every project file; it returns whether anything changed.
 fn update(
     opts: &GlobalOpts,
     verb: &str,
+    style: anstyle::Style,
     mut change: impl FnMut(&mut TrustStore, &Layer) -> bool,
 ) -> Result<()> {
     let session = Session::open(opts)?;
@@ -38,7 +41,7 @@ fn update(
         .collect();
     store.save()?;
     for layer in changed {
-        println!("{verb} {layer}");
+        println!("{style}{verb}{style:#} {layer}");
     }
     Ok(())
 }

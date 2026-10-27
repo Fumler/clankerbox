@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use anstream::println;
 use anyhow::Result;
 use serde::Serialize;
 
@@ -9,6 +10,7 @@ use crate::config::model::{BackendKind, NonoConfig};
 use crate::config::trust::TrustStore;
 use crate::policy::Policy;
 use crate::sandbox::GeneratedFile;
+use crate::style::{self, DIM, ERROR, LABEL, OK, WARN};
 
 #[derive(Serialize)]
 struct Report<'a> {
@@ -79,30 +81,32 @@ pub fn show(run: &RunArgs, json: bool) -> Result<()> {
         return Ok(());
     }
 
-    println!("project root  {}", report.project_root.display());
-    println!("config files");
+    println!(
+        "{LABEL}project root{LABEL:#}  {}",
+        report.project_root.display()
+    );
+    println!("{LABEL}config files{LABEL:#}");
     for file in &report.config_files {
-        let mark = if file.trusted {
-            "✓"
+        if file.trusted {
+            println!("  {OK}✓{OK:#} {}", file.path);
         } else {
-            "✗ untrusted:"
-        };
-        println!("  {mark} {}", file.path);
+            println!("  {ERROR}✗ untrusted:{ERROR:#} {}", file.path);
+        }
     }
     let kind = report
         .agent
         .kind
-        .map(|k| format!(" (kind: {k})"))
+        .map(|k| format!(" {DIM}(kind: {k}){DIM:#}"))
         .unwrap_or_default();
-    println!("agent         {}{kind}", report.agent.name);
+    println!("{LABEL}agent{LABEL:#}         {}{kind}", report.agent.name);
     if !opts.profiles.is_empty() {
-        println!("profiles      {}", opts.profiles.join(", "));
+        println!("{LABEL}profiles{LABEL:#}      {}", opts.profiles.join(", "));
     }
     println!(
-        "backend       {}",
+        "{LABEL}backend{LABEL:#}       {}",
         format!("{:?}", report.backend).to_lowercase()
     );
-    println!("grants");
+    println!("{LABEL}grants{LABEL:#}");
     let width = resolved
         .policy
         .grants
@@ -112,21 +116,26 @@ pub fn show(run: &RunArgs, json: bool) -> Result<()> {
         .unwrap_or(0);
     for g in &resolved.policy.grants {
         let path = g.path.display().to_string();
-        println!("  {} {path:<width$}  ← {}", g.access, g.source);
+        let access = style::access(g.access);
+        println!(
+            "  {access}{}{access:#} {path:<width$}  {DIM}← {}{DIM:#}",
+            g.access, g.source
+        );
     }
+    let network = style::network(resolved.policy.network);
     println!(
-        "network       {}",
+        "{LABEL}network{LABEL:#}       {network}{}{network:#}",
         format!("{:?}", resolved.policy.network).to_lowercase()
     );
     for (k, v) in report.env {
-        println!("env           {k}={v}");
+        println!("{LABEL}env{LABEL:#}           {k}={v}");
     }
     for file in report.generated_files {
-        println!("generated     {}", file.path.display());
+        println!("{LABEL}generated{LABEL:#}     {}", file.path.display());
     }
-    println!("command       {}", launch.display_command());
+    println!("{LABEL}command{LABEL:#}       {}", launch.display_command());
     for warning in report.warnings {
-        println!("warning       {warning}");
+        println!("{WARN}warning{WARN:#}       {warning}");
     }
     Ok(())
 }

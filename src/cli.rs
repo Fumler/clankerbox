@@ -19,7 +19,7 @@ use clap_complete::Shell;
 /// `--allow ./dir` for nono). `--nono-<flag>` passes `--<flag>` to nono, for flags cb uses itself
 /// (e.g. `--nono-dry-run`). Everything after `--` is passed to the agent.
 #[derive(Debug, Parser)]
-#[command(name = "cb", version, verbatim_doc_comment)]
+#[command(name = "cb", version, verbatim_doc_comment, styles = crate::style::HELP)]
 pub struct Cli {
     #[command(flatten)]
     pub global: GlobalOpts,

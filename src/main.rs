@@ -4,20 +4,23 @@ mod config;
 mod context;
 mod policy;
 mod sandbox;
+mod style;
 
 use std::io;
 use std::process::ExitCode;
 
+use anstream::{eprintln, println};
 use anyhow::Result;
 use clap::CommandFactory;
 
 use crate::cli::{Cli, Command, Invocation};
+use crate::style::ERROR;
 
 fn main() -> ExitCode {
     match run() {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("cb: error: {e:#}");
+            eprintln!("cb: {ERROR}error:{ERROR:#} {e:#}");
             ExitCode::FAILURE
         }
     }
