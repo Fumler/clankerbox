@@ -1,21 +1,45 @@
 # clankerbox
 
-A project-aware wrapper that runs AI coding agents (Claude Code, pi, codex, …) inside a sandbox
-([nono](https://nono.sh) for now).
-
-Each project can carry a `.clankerbox.toml` saying what the agent needs beyond the repo itself:
-read access to a sibling frontend repo, a dependency checked out elsewhere, extra agent flags.
-
-```sh
-cd ~/code/backend
-cb init                         # creates .clankerbox.toml
-$EDITOR .clankerbox.toml        # read = ["../frontend"]
-cb                              # runs claude, sandboxed, with the extra access
-```
+`cb` runs AI coding agents (Claude Code, pi, codex, …) inside a [nono](https://nono.sh) sandbox,
+with per-project rules. Plain `nono run` needs the right flags on every run; with `cb` a project
+carries a `.clankerbox.toml` that says what the agent needs beyond the repo: a sibling repo to
+read, a dependency checked out elsewhere, extra agent flags. Linux and macOS.
 
 > [!NOTE]
 > Largely written with AI (Claude Code) under human direction and review. Check `cb show` before
 > trusting what a run grants.
+
+## Quickstart
+
+1. Install [nono](https://nono.sh), then the nono profile for your agent:
+
+   ```sh
+   nono pull nolabs-ai/claude      # or nolabs-ai/pi, nolabs-ai/omp
+   ```
+
+   If you skip this, `cb` offers to run it for you.
+
+2. Install `cb` from a [release](https://github.com/Fumler/clankerbox/releases) or with Nix
+   (`nix profile install github:Fumler/clankerbox`), then check the setup with `cb doctor`.
+
+3. Run it. With no config at all, `cb` runs Claude Code sandboxed to the current project:
+
+   ```sh
+   cb                              # run claude in the sandbox
+   cb --allow ./scratch            # one-off extra access
+   cb show                         # what a run grants (paths it can access), and why
+   ```
+
+4. Optionally, add rules for a project that always needs extra access:
+
+   ```sh
+   cb init                         # write .clankerbox.toml, with groups for detected toolchains
+   $EDITOR .clankerbox.toml        # e.g. read = ["../frontend"]
+   cb                              # prompts once to trust the new file, then runs
+   ```
+
+Your own defaults (agents, cb profiles, extra access everywhere) go in an optional
+[global config](#example-global-config).
 
 ## Usage
 
@@ -28,29 +52,23 @@ Recognised anywhere before a lone `--`:
 | Option | |
 |---|---|
 | `-A/--agent <name>` | Run a different agent |
-| `-p/--profile <name>` | Apply a [profile](#agents-and-profiles) (repeatable) |
-| `--nono-profile <name>` | Override the configured nono profile |
+| `-p/--profile <name>` | Apply a [cb profile](#agents-and-cb-profiles) (repeatable) |
+| `--nono-profile <name>` | Override the nono profile |
 | `-C <dir>` | Run as if started in `<dir>` |
 | `--no-project` | Ignore project config files |
 | `--unsandboxed` | Run without a sandbox (or set `sandbox.backend = "none"`) |
 
-Every other argument before `--` goes to the sandbox backend verbatim, e.g. `--allow ./dir`.
-Arguments after `--` go to the agent, after any configured agent args.
-
-```sh
-cb -A pi -p personal
-cb --allow ./scratch -- --resume    # one-off grant, plus an agent flag
-cb show                             # what would run, and why
-```
+Other arguments before `--` go to nono verbatim, e.g. `--allow ./dir`. Arguments after `--` go to
+the agent.
 
 | Subcommand | |
 |---|---|
-| `init [--local]` | Create `.clankerbox.toml` with nono groups for detected toolchains, or a personal `.clankerbox.local.toml` added to `.git/info/exclude` |
+| `init [--local] [--force]` | Create `.clankerbox.toml`, or a personal `.clankerbox.local.toml` added to `.git/info/exclude` |
 | `trust` / `untrust` | Approve or revoke the project config files that apply here |
 | `show [--json] [ARGS]` | Config files, grants with their source, and the final command |
-| `agents` | Available agents (`*` marks the default) and profiles |
+| `agents` | Available agents (`*` marks the default) and cb profiles |
 | `edit [--local]` | Open the nearest config file in `$EDITOR`, then trust it |
-| `doctor` | Check nono, the agent command, profiles and config files |
+| `doctor` | Check nono, the agent command, nono profiles and config files |
 | `schema` | JSON Schema for config files |
 | `completions <shell>` | Shell completions |
 
@@ -58,22 +76,27 @@ cb show                             # what would run, and why
 
 With no config, cb grants only:
 
-- **Base policy:** the agent's nono profile, e.g. `claude-code` for `claude`, `pi` for `pi` and
-  `omp` for `omp`. `codex` and `opencode` have none, so they get nono's built-in defaults.
-- **Project root:** read-write, unless it is `$HOME` or contains it. This is the git toplevel,
-  otherwise the current directory.
-- **Current directory:** `--allow-cwd`, at the level the profile sets.
-- **Linked git worktrees:** read-write on the shared git directory, and for `claude` also the main
-  worktree's `.claude/settings.local.json`.
+- **Base policy:** the agent's nono profile: `claude-code` for `claude`, `pi` for `pi`, `omp` for
+  `omp` (installed with `nono pull`). `codex` and `opencode` get nono's built-in defaults.
+- **Project root:** read-write, unless it is `$HOME` or contains it.
+- **Current directory:** `--allow-cwd`, at the level the nono profile sets.
+- **Linked git worktrees:** the shared git directory, and for `claude` the main worktree's
+  `.claude/settings.local.json`.
 
-Network and environment variables follow the nono profile, which by default allows outbound
-network and passes the environment through. nono runs in supervised mode (`nono run`). Project
-config files only take effect after `cb trust`. `cb show` lists exactly what a run grants.
+Network and environment variables follow the nono profile (by default: outbound network allowed,
+environment passed through).
 
 `cb init` adds only what detected toolchains need: nono
 [groups](https://nono.sh/docs/cli/features/profiles-groups) (e.g. `rust_runtime` for a
 `Cargo.toml`) and write access to their shared package caches (e.g. `~/.cargo/registry`), which
-it warns about. All other settings in the generated file are commented out.
+it warns about.
+
+## Trust
+
+A repository's config can grant access to anything, so project files must be approved, like
+`direnv allow`. The first run with a new or changed file shows its contents and grants and asks
+`Trust these files and continue? [y/N]`. Without a terminal, cb refuses until you run `cb trust`.
+`init` and `edit` trust what they write; the global config is always trusted.
 
 ## Configuration
 
@@ -83,30 +106,20 @@ Layers, lowest precedence first:
 2. Global config: `$XDG_CONFIG_HOME/clankerbox/config.toml`
 3. Each `.clankerbox.toml` from the project root down to the current directory, each followed
    by its `.clankerbox.local.toml`
-4. Profiles selected with `-p`, in order
+4. cb profiles selected with `-p`, in order
 5. Command-line arguments
 
 How layers combine:
 
-- Lists are appended and single values replaced.
-- Everything is additive: a project can grant more access but never remove any.
+- Lists are appended, single values replaced. Nothing can remove access.
 - Unknown keys are errors.
-- More specific settings win over general ones, lowest precedence first:
-  1. top-level `[sandbox]`
-  2. `[agents.<parent>]`
-  3. `[agents.<name>]`
-  4. the same three for each profile
-
-  Within each step, later files win. A top-level `sandbox.nono.profile` is only a default for
-  agents that don't set their own.
+- More specific settings win, lowest first: top-level `[sandbox]`, the agent it `inherits` from,
+  the agent itself, then the same for each cb profile. Within each step, later files win.
 
 Config files are searched from the current directory up to the git toplevel. Outside git, the
-search stops below `$HOME`; outside `$HOME`, only the current directory is searched.
-
-The **project root** is resolved in this order: the directory with `root = true`, the git
-toplevel, the outermost directory with a config file, the current directory. The agent gets
-read-write access to it, unless it is `$HOME` or contains it. In a linked worktree the agent also
-gets the shared git directory.
+search stops below `$HOME`; outside `$HOME`, only the current directory is searched. The
+**project root** is the directory with `root = true`, else the git toplevel, else the outermost
+directory with a config file, else the current directory.
 
 ```toml
 # .clankerbox.toml
@@ -123,7 +136,7 @@ read_commands = []                       # make the directory of a $PATH command
 network = "allow"                        # or "block"
 open_ports = [3000]
 env = { RUST_LOG = "debug" }
-extra_args = []                          # raw backend arguments
+extra_args = []                          # raw nono arguments
 
 [sandbox.nono]
 mode = "supervised"                      # or "direct"
@@ -132,7 +145,6 @@ groups = ["node_runtime"]                # `nono profile groups`
 
 [agents.claude]
 args = ["--model", "opus"]
-sandbox.nono.profile = "claude-code"
 
 [when.macos]                             # also: linux, wsl
 sandbox.read = ["~/Library/Caches/foo"]
@@ -142,112 +154,42 @@ Missing paths are skipped with a warning, so a teammate without `../frontend` ca
 
 ### Variables
 
-Paths and `env` values can use `${name}`. A project declares defaults in `[vars]`. They can be
-overridden, from highest precedence to lowest, by:
-
-1. `CLANKERBOX_VAR_<name>` in the environment
-2. `.clankerbox.local.toml`
-3. the global config
-
+Paths and `env` values can use `${name}`. A project declares defaults in `[vars]`; these are
+overridden by, highest first: `CLANKERBOX_VAR_<name>`, `.clankerbox.local.toml`, the global config.
 For example, set `vars.projects = "~/work"` globally if your checkouts don't sit side by side.
 
-Built-in variables:
-- `${project_root}`
-- `${config_dir}`, the directory of the current file
-- `${home}`
-- `${cwd}`
-- `${env:NAME}`
+Built-ins: `${project_root}`, `${config_dir}` (the current file's directory), `${home}`, `${cwd}`,
+`${env:NAME}`. Any reference can have a fallback: `${name:-fallback}`.
 
-Any reference can have a fallback: `${name:-fallback}`.
+### Agents and cb profiles
 
-### Agents and profiles
+Any layer can override agent fields or define agents, e.g. `[agents.claude-opus]` with
+`inherits = "claude"`.
 
-Any layer can override agent fields or define agents, e.g.
-`[agents.claude-opus]` with `inherits = "claude"`. `kind = "claude"` (inherited) also grants the
-main worktree's `.claude/settings.local.json` in linked worktrees.
+A **cb profile** (`[profiles.<name>]`, selected with `-p <name>`) is an overlay with the
+config-file format. It is separate from agents and from **nono profiles** (nono's own policy
+files, set with `sandbox.nono.profile`), so one cb profile can adjust every agent.
 
-A **profile** (`[profiles.<name>]`) is an overlay with the config-file format, applied when you
-pass `-p <name>`. Profiles are separate from agents, so one `personal` profile can adjust every
-agent; see the example below.
+### Example global config
 
-## Trust
+```toml
+# $XDG_CONFIG_HOME/clankerbox/config.toml
+[sandbox]
+read = ["~/notes"]                       # extra access in every project
 
-A repository's config can grant access to anything, so project files must be approved, like
-`direnv allow`:
-- A new or changed file shows its contents and grants, and asks before running.
-- Without a terminal, cb refuses until you run `cb trust`.
-- Hashes are stored in `$XDG_STATE_HOME/clankerbox/trust.toml`.
-- `init` and `edit` trust what they write. The global config is always trusted.
+# `cb -p personal`: a second Claude account
+[profiles.personal]
+sandbox.env = { CLAUDE_CONFIG_DIR = "${home}/.claude-personal" }
+sandbox.allow = ["~/.claude-personal"]
+```
 
 ## nono backend
 
 - **[Execution mode](https://nono.sh/docs/cli/features/execution-modes):** `supervised`
-  (default, `nono run`) or `direct` (`nono wrap`, for tools like Herdr that need the agent as the
-  foreground process).
-- **Grants:** they become `--read`/`--write`/`--allow` (or the `-file` variants), `--block-net`,
-  `--open-port` and `--listen-port`.
-- **Groups:** nono has no flag for policy groups, so cb writes a small profile that extends the
-  base profile. It goes in a private directory: `$XDG_RUNTIME_DIR/clankerbox`, or
-  `$XDG_CACHE_HOME/clankerbox`.
-- **WSL:** `read_commands` directories are held open for the agent's lifetime, because on 9p
-  mounts like `/mnt/c` Landlock rules stop matching once the dentry is evicted.
-- **Environment:** nono passes the environment through unless the profile filters it
-  (`environment.allow_vars`/`deny_vars`).
-
-## Migrating from a shell wrapper
-
-Wrappers like `nclaude`, `nclaude-personal`, `npi` and `nomp` become one global config. Worktree
-handling is built in.
-
-```toml
-# ~/.config/clankerbox/config.toml
-[agents.claude]
-sandbox.nono.profile = "nclaude"
-sandbox.nono.mode = "direct"             # for Herdr
-sandbox.env = { HERDR_AGENT = "claude" }
-
-[agents.pi]
-sandbox.nono.profile = "npi"
-
-[agents.omp]
-sandbox.nono.profile = "nomp"
-
-[profiles.personal]
-sandbox.env = { CLAUDE_CONFIG_DIR = "${home}/.claude-personal" }
-
-[profiles.personal.agents.claude]
-sandbox.nono.profile = "nclaude-personal"
-
-[profiles.personal.agents.pi]
-sandbox.nono.profile = "npi-personal"
-
-[when.wsl.sandbox]
-nono.extends = ["wsl"]
-read_commands = ["orca.exe", "powershell.exe", "op-ssh-sign-wsl.exe", "ssh.exe"]
-```
-
-| Before | After |
-|---|---|
-| `nclaude` / `nclaude-personal` | `cb` / `cb -p personal` |
-| `npi` / `npi-personal` | `cb -A pi` / `cb -A pi -p personal` |
-| `nclaude --read ~/x -- --resume` | `cb --read ~/x -- --resume` |
-
-## Development
-
-```sh
-nix develop path:. -c cargo test
-nix build path:.
-```
-
-Commits follow [Conventional Commits](https://www.conventionalcommits.org), enforced by the **CI - Lint and test** workflow.
-To release, run the **Dispatch - Release** workflow from the Actions tab. It:
-
-1. picks the next [semver](https://semver.org) version from the commits (or uses one you give);
-2. updates `Cargo.toml` and `CHANGELOG.md` with [git-cliff](https://git-cliff.org), then tags;
-3. publishes a GitHub release with `cb` built for x86_64 and arm64 Linux (static musl) and macOS.
-
-Sandbox backends live in `src/sandbox/`, one file each, implementing the `Sandbox` trait. Adding
-one also means adding a `BackendKind` variant.
+  (default, `nono run`) or `direct` (`nono wrap`, for tools that need the agent as the foreground
+  process).
+- **Groups:** nono has no flag for policy groups, so cb writes a small nono profile extending the
+  base one, in `$XDG_RUNTIME_DIR/clankerbox` (or `$XDG_CACHE_HOME/clankerbox`).
 
 ## License
 
