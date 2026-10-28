@@ -112,7 +112,7 @@ pub enum Network {
 pub struct NonoConfig {
     /// Defaults to `supervised`.
     pub mode: Option<NonoMode>,
-    /// Base nono profile (name or path).
+    /// Base nono profile (name or path), or one built into cb: `cb:claude`.
     pub profile: Option<String>,
     /// Additional base profiles, passed as `--extends`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -120,6 +120,10 @@ pub struct NonoConfig {
     /// Policy groups to include on top of the profile (see `nono profile groups`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<String>,
+    /// Load cb's Claude Code plugin, which tells Claude how to diagnose a sandbox denial and
+    /// which cb settings would fix it. Only for agents with `kind = "claude"`, whose command must
+    /// take Claude Code's flags (`--plugin-dir`), so not a wrapper like `npx`. Defaults to true.
+    pub explain_denials: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]

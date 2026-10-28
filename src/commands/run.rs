@@ -137,7 +137,8 @@ fn review_text(session: &Session, resolved: &Resolved, untrusted: &[&Layer]) -> 
             write_file_review(&mut out, layer, resolved);
         }
     }
-    for line in sandbox::backend(resolved, &session.dirs).base_access() {
+    let backend = sandbox::backend(resolved, &session.dirs);
+    for line in backend.base_access().iter().chain(&backend.notes()) {
         let _ = writeln!(out, "  {DIM}{line}{DIM:#}");
     }
     let _ = writeln!(
@@ -219,6 +220,7 @@ mod tests {
             config: home.join("config"),
             state: home.join("state"),
             runtime: home.join("run"),
+            claude_config: None,
         };
         let mut discovered = discover(&home.join("repo"), &dirs, false).unwrap();
         discovered.detect(&dirs, false).unwrap();
@@ -259,10 +261,11 @@ mod tests {
 
         for text in [detected, file] {
             assert!(
-                text.contains("plus everything nono profile claude-code allows"),
+                text.contains("plus everything nono profile cb:claude allows"),
                 "{text}"
             );
             assert!(text.contains("network:"), "{text}");
+            assert!(text.contains("explains sandbox denials"), "{text}");
         }
     }
 }

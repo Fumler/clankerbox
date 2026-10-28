@@ -98,6 +98,14 @@ pub enum Command {
     Schema,
     /// Print shell completions.
     Completions { shell: Shell },
+    /// Run a Claude Code hook (used by cb's Claude plugin).
+    #[command(hide = true)]
+    Hook { name: HookName },
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum HookName {
+    ExplainDenial,
 }
 
 pub const SUBCOMMANDS: &[&str] = &[
@@ -110,6 +118,7 @@ pub const SUBCOMMANDS: &[&str] = &[
     "doctor",
     "schema",
     "completions",
+    "hook",
     "help",
 ];
 

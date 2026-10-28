@@ -1,3 +1,4 @@
+mod claude_plugin;
 mod nono;
 mod unsandboxed;
 
@@ -15,7 +16,8 @@ use anyhow::{Context, Result, bail};
 use rustix::process::getuid;
 use serde::Serialize;
 
-pub use self::nono::Nono;
+pub use self::claude_plugin::explain_denial;
+pub use self::nono::{Nono, check_profile as check_nono_profile};
 pub use self::unsandboxed::Unsandboxed;
 use crate::config::Resolved;
 use crate::config::model::BackendKind;
@@ -62,6 +64,11 @@ pub trait Sandbox {
     /// Access the backend allows on top of `Policy` grants, as lines for the user.
     fn base_access(&self) -> Vec<String>;
 
+    /// Additions to a run other than access, as lines for the user.
+    fn notes(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Every rule `launch` would apply, as the backend reports them; empty if unsupported.
     fn full_access(&self, _launch: &Launch) -> Result<Vec<String>> {
         Ok(Vec::new())
@@ -72,6 +79,9 @@ pub fn backend(resolved: &Resolved, dirs: &Dirs) -> Box<dyn Sandbox> {
     match resolved.backend {
         BackendKind::Nono => Box::new(Nono {
             options: resolved.nono.clone(),
+            agent_kind: resolved.agent.kind.clone(),
+            cb: std::env::current_exe().unwrap_or_else(|_| "cb".into()),
+            home: dirs.home.clone(),
             runtime_dir: dirs.runtime.clone(),
         }),
         BackendKind::None => Box::new(Unsandboxed),

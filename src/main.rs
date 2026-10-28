@@ -50,6 +50,15 @@ fn run() -> Result<ExitCode> {
         Command::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "cb", &mut io::stdout());
         }
+        Command::Hook {
+            name: cli::HookName::ExplainDenial,
+        } => {
+            // Bad input must not break the session.
+            let input = serde_json::from_reader(io::stdin()).unwrap_or_default();
+            if let Some(output) = sandbox::explain_denial(&input) {
+                println!("{output}");
+            }
+        }
     }
     Ok(ExitCode::SUCCESS)
 }

@@ -5,6 +5,7 @@ pub mod trust;
 pub mod vars;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -14,6 +15,9 @@ use self::model::{BackendKind, ConfigFile, NonoConfig, Platform, SandboxConfig};
 use self::vars::Vars;
 use crate::context::{self, Dirs};
 use crate::policy::{Access, Grant, Policy, Source};
+
+/// Subdirectories of Claude's config dir whose entries dotfiles managers commonly link.
+const CLAUDE_LINKED_DIRS: &[&str] = &["skills", "agents", "commands", "output-styles"];
 
 #[derive(Debug)]
 pub struct Resolved {
@@ -114,6 +118,8 @@ pub fn resolve(
         policy: Policy::default(),
         backend: None,
         nono: NonoConfig::default(),
+        claude_config_env: dirs.claude_config.clone(),
+        claude_config_layer: None,
         warnings: Vec::new(),
     };
     builder.builtin_grants(d);
@@ -253,6 +259,9 @@ struct Builder {
     policy: Policy,
     backend: Option<BackendKind>,
     nono: NonoConfig,
+    claude_config_env: Option<PathBuf>,
+    /// The layer that set `CLAUDE_CONFIG_DIR` in config.
+    claude_config_layer: Option<(Source, Origin)>,
     warnings: Vec<String>,
 }
 
@@ -276,8 +285,10 @@ impl Builder {
     }
 
     fn kind_grants(&mut self, kind: Option<&str>, d: &Discovered) {
-        if kind == Some("claude")
-            && let Some(main) = d.git.as_ref().and_then(|g| g.main_worktree())
+        if kind != Some("claude") {
+            return;
+        }
+        if let Some(main) = d.git.as_ref().and_then(|g| g.main_worktree())
             && let Ok(path) = main.join(".claude/settings.local.json").canonicalize()
         {
             self.policy.grant(Grant {
@@ -286,6 +297,85 @@ impl Builder {
                 file: true,
                 pin: false,
                 source: Source::Builtin("claude settings from main worktree"),
+            });
+        }
+        if let Some(config_dir) = self.claude_config_dir() {
+            self.claude_symlink_targets(&config_dir);
+        }
+    }
+
+    /// Claude's config dir, granted read-write with its lock file when `CLAUDE_CONFIG_DIR` sets
+    /// it. `None` when its symlinks must not be followed: a project file could otherwise point
+    /// it at a repo directory whose links reach anywhere.
+    fn claude_config_dir(&mut self) -> Option<PathBuf> {
+        let (raw, source, origin) = match self.policy.env.get("CLAUDE_CONFIG_DIR") {
+            Some(value) => {
+                let (source, origin) = self.claude_config_layer.clone()?;
+                (PathBuf::from(value), source, origin)
+            }
+            None => match self.claude_config_env.clone() {
+                Some(raw) => (raw, Source::Builtin("CLAUDE_CONFIG_DIR"), Origin::Global),
+                None => return Some(self.vars.home.join(".claude")),
+            },
+        };
+        let entry = format!("CLAUDE_CONFIG_DIR={}", raw.display());
+        let dir = match raw.canonicalize() {
+            Ok(dir) if raw.is_absolute() && dir.is_dir() => dir,
+            _ => {
+                self.warn(&source, &entry, "not an existing absolute directory");
+                return None;
+            }
+        };
+        if self.vars.home.starts_with(&dir) {
+            self.warn(&source, &entry, "contains $HOME");
+            return None;
+        }
+        self.grant_dir(dir.clone(), source.clone());
+        let mut lock = dir.clone().into_os_string();
+        lock.push(".lock");
+        if let Ok(lock) = PathBuf::from(lock).canonicalize() {
+            self.policy.grant(Grant {
+                path: lock,
+                access: Access::ReadWrite,
+                file: true,
+                pin: false,
+                source,
+            });
+        }
+        matches!(origin, Origin::Preset | Origin::Global).then_some(dir)
+    }
+
+    /// Landlock checks symlink targets, so dotfiles-managed Claude config needs its targets.
+    /// Read-only: the targets are often a dotfiles repo.
+    fn claude_symlink_targets(&mut self, config_dir: &Path) {
+        let Ok(config_dir) = config_dir.canonicalize() else {
+            return;
+        };
+        let home = self.vars.home.clone();
+        let mut targets = BTreeSet::new();
+        let dirs = std::iter::once(config_dir.clone())
+            .chain(CLAUDE_LINKED_DIRS.iter().map(|d| config_dir.join(d)));
+        for dir in dirs {
+            let Ok(entries) = fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                if entry.file_type().is_ok_and(|t| t.is_symlink())
+                    && let Ok(target) = entry.path().canonicalize()
+                    && !target.starts_with(&config_dir)
+                    && !home.starts_with(&target)
+                {
+                    targets.insert(target);
+                }
+            }
+        }
+        for target in compact(targets, &home) {
+            self.policy.grant(Grant {
+                file: !target.is_dir(),
+                path: target,
+                access: Access::Read,
+                pin: false,
+                source: Source::Builtin("claude config symlink"),
             });
         }
     }
@@ -342,6 +432,9 @@ impl Builder {
         for (key, value) in &sandbox.env {
             match self.vars.expand(value, &layer.dir) {
                 Ok(value) => {
+                    if key == "CLAUDE_CONFIG_DIR" {
+                        self.claude_config_layer = Some((source.clone(), layer.origin));
+                    }
                     self.policy.env.insert(key.clone(), value);
                 }
                 Err(e) => self.warn(&source, key, &e),
@@ -362,6 +455,9 @@ impl Builder {
         if nono.profile.is_some() {
             self.nono.profile.clone_from(&nono.profile);
         }
+        if nono.explain_denials.is_some() {
+            self.nono.explain_denials = nono.explain_denials;
+        }
         extend_unique(&mut self.nono.extends, &nono.extends);
         extend_unique(&mut self.nono.groups, &nono.groups);
     }
@@ -374,6 +470,30 @@ impl Builder {
         self.warnings
             .push(format!("{source}: skipping `{entry}`: {reason}"));
     }
+}
+
+/// Replaces every target set covering all entries of a directory with the directory itself:
+/// the same paths at scan time, in one grant. Never widens to `home` or above.
+fn compact(mut targets: BTreeSet<PathBuf>, home: &Path) -> BTreeSet<PathBuf> {
+    let parents: BTreeSet<PathBuf> = targets
+        .iter()
+        .filter_map(|t| t.parent().map(Path::to_path_buf))
+        .filter(|p| !home.starts_with(p))
+        .collect();
+    for parent in parents {
+        let Ok(entries) = fs::read_dir(&parent) else {
+            continue;
+        };
+        let entries: Option<Vec<PathBuf>> = entries.map(|e| e.ok().map(|e| e.path())).collect();
+        if let Some(entries) = entries
+            && entries.len() > 1
+            && entries.iter().all(|e| targets.contains(e))
+        {
+            targets.retain(|t| t.parent() != Some(&parent));
+            targets.insert(parent);
+        }
+    }
+    targets
 }
 
 fn extend_unique<T: PartialEq + Clone>(into: &mut Vec<T>, from: &[T]) {
@@ -408,6 +528,7 @@ mod tests {
                 config: home.join("config"),
                 state: home.join("state"),
                 runtime: home.join("run"),
+                claude_config: None,
             };
             fs::create_dir_all(&dirs.config).unwrap();
             fs::write(dirs.global_config(), global).unwrap();
@@ -466,7 +587,7 @@ mod tests {
         assert_eq!(r.agent.name, "claude");
         assert_eq!(r.agent.kind.as_deref(), Some("claude"));
         assert_eq!(r.backend, BackendKind::Nono);
-        assert_eq!(r.nono.profile.as_deref(), Some("claude-code"));
+        assert_eq!(r.nono.profile.as_deref(), Some("cb:claude"));
         assert_eq!(grants(&r), [("repo".into(), Access::ReadWrite)]);
     }
 
@@ -617,6 +738,218 @@ mod tests {
         assert_eq!(r.agent.command, "wrapper");
         assert_eq!(r.nono.profile.as_deref(), Some("custom"));
         assert_eq!(f.resolve("repo", None).unwrap().agent.command, "claude2");
+    }
+
+    #[test]
+    fn explain_denials_is_overridden_by_later_layers_only_when_set() {
+        let f = Fixture::new("[sandbox.nono]\nexplain_denials = false");
+        fs::create_dir_all(f.home.join("repo/.git")).unwrap();
+        f.write(&format!("repo/{PROJECT_FILE}"), "[sandbox]\nread = []");
+        assert_eq!(
+            f.resolve("repo", None).unwrap().nono.explain_denials,
+            Some(false)
+        );
+
+        f.write(
+            &format!("repo/{LOCAL_FILE}"),
+            "[agents.claude]\nsandbox.nono.explain_denials = true",
+        );
+        assert_eq!(
+            f.resolve("repo", None).unwrap().nono.explain_denials,
+            Some(true)
+        );
+        assert_eq!(
+            f.resolve("repo", Some("pi")).unwrap().nono.explain_denials,
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn claude_config_dir_from_config_beats_environment() {
+        let mut f = Fixture::new(
+            "[agents.claude]\nsandbox.env = { CLAUDE_CONFIG_DIR = \"${home}/.claude-personal\" }",
+        );
+        fs::create_dir_all(f.home.join("repo/.git")).unwrap();
+        fs::create_dir_all(f.home.join(".claude-personal")).unwrap();
+        fs::create_dir_all(f.home.join(".claude-env")).unwrap();
+        f.write(".claude-personal.lock", "");
+        f.dirs.claude_config = Some(f.home.join(".claude-env"));
+
+        let r = f.resolve("repo", None).unwrap();
+        assert_eq!(
+            grants(&r),
+            [
+                ("repo".into(), Access::ReadWrite),
+                (".claude-personal".into(), Access::ReadWrite),
+                (".claude-personal.lock".into(), Access::ReadWrite),
+            ]
+        );
+        assert!(r.policy.grants[2].file);
+
+        assert_eq!(grants(&f.resolve("repo", Some("pi")).unwrap()).len(), 1);
+
+        f.write("config/config.toml", "");
+        let r = f.resolve("repo", None).unwrap();
+        assert_eq!(grants(&r)[1], (".claude-env".into(), Access::ReadWrite));
+
+        for bad in [".claude-missing", "relative"] {
+            f.dirs.claude_config = Some(if bad == "relative" {
+                PathBuf::from("relative")
+            } else {
+                f.home.join(bad)
+            });
+            let r = f.resolve("repo", None).unwrap();
+            assert_eq!(grants(&r).len(), 1, "{bad}");
+            assert!(
+                r.warnings.iter().any(|w| w.contains("CLAUDE_CONFIG_DIR")),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_config_symlinks_grant_targets_read_only() {
+        let f = Fixture::new("");
+        fs::create_dir_all(f.home.join("repo/.git")).unwrap();
+        let link = |target: &str, link: &str| {
+            let link = f.home.join(link);
+            fs::create_dir_all(link.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(f.home.join(target), link).unwrap();
+        };
+        f.write("dotfiles/settings.json", "{}");
+        f.write(".claude/real.md", "");
+        for skill in ["a", "b"] {
+            fs::create_dir_all(f.home.join("dotfiles/skills").join(skill)).unwrap();
+            link(
+                &format!("dotfiles/skills/{skill}"),
+                &format!(".claude/skills/{skill}"),
+            );
+        }
+        fs::create_dir_all(f.home.join("other/c")).unwrap();
+        fs::create_dir_all(f.home.join("other/unlinked")).unwrap();
+        link("dotfiles/settings.json", ".claude/settings.json");
+        link("other/c", ".claude/agents/c");
+        link(".claude/real.md", ".claude/inside.md");
+        link("nowhere", ".claude/dangling");
+
+        let r = f.resolve("repo", None).unwrap();
+        let mut found: Vec<_> = r
+            .policy
+            .grants
+            .iter()
+            .filter(|g| g.source == Source::Builtin("claude config symlink"))
+            .map(|g| {
+                assert_eq!(g.access, Access::Read);
+                g.path
+                    .strip_prefix(&f.home)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        found.sort();
+        assert_eq!(
+            found,
+            ["dotfiles/settings.json", "dotfiles/skills", "other/c"]
+        );
+        assert_eq!(grants(&f.resolve("repo", Some("pi")).unwrap()).len(), 1);
+    }
+
+    #[test]
+    fn project_claude_config_dir_is_attributed_and_its_symlinks_ignored() {
+        let f = Fixture::new("");
+        fs::create_dir_all(f.home.join("repo/.git")).unwrap();
+        fs::create_dir_all(f.home.join("repo/cfg")).unwrap();
+        f.write(".ssh/id_ed25519", "secret");
+        std::os::unix::fs::symlink(f.home.join(".ssh/id_ed25519"), f.home.join("repo/cfg/key"))
+            .unwrap();
+        let project = f.write(
+            &format!("repo/{PROJECT_FILE}"),
+            "[sandbox]\nenv = { CLAUDE_CONFIG_DIR = \"${project_root}/cfg\" }",
+        );
+
+        let r = f.resolve("repo", None).unwrap();
+        let cfg = r
+            .policy
+            .grants
+            .iter()
+            .find(|g| g.path.ends_with("cfg"))
+            .unwrap();
+        assert_eq!(cfg.source, Source::File(project.clone()));
+        assert!(
+            !r.policy
+                .grants
+                .iter()
+                .any(|g| g.path.ends_with("id_ed25519")),
+            "{:?}",
+            r.policy.grants
+        );
+
+        f.write(
+            &format!("repo/{PROJECT_FILE}"),
+            "[sandbox]\nenv = { CLAUDE_CONFIG_DIR = \"${home}\" }",
+        );
+        let r = f.resolve("repo", None).unwrap();
+        assert_eq!(grants(&r), [("repo".into(), Access::ReadWrite)]);
+        assert!(
+            r.warnings.iter().any(|w| w.contains("contains $HOME")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    #[test]
+    fn claude_symlinks_never_reach_home_and_need_a_valid_config_dir() {
+        let mut f = Fixture::new("");
+        fs::create_dir_all(f.home.join("repo/.git")).unwrap();
+        fs::create_dir_all(f.home.join(".claude")).unwrap();
+        std::os::unix::fs::symlink(&f.home, f.home.join(".claude/ws")).unwrap();
+        std::os::unix::fs::symlink("/", f.home.join(".claude/root")).unwrap();
+        f.write("dotfiles/CLAUDE.md", "");
+        std::os::unix::fs::symlink(
+            f.home.join("dotfiles/CLAUDE.md"),
+            f.home.join(".claude/CLAUDE.md"),
+        )
+        .unwrap();
+        assert_eq!(
+            grants(&f.resolve("repo", None).unwrap()),
+            [
+                ("repo".into(), Access::ReadWrite),
+                ("CLAUDE.md".into(), Access::Read),
+            ]
+        );
+
+        f.dirs.claude_config = Some(f.home.join(".claude-missing"));
+        assert_eq!(
+            grants(&f.resolve("repo", None).unwrap()),
+            [("repo".into(), Access::ReadWrite)]
+        );
+    }
+
+    #[test]
+    fn compacting_never_widens_to_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().canonicalize().unwrap();
+        fs::create_dir(home.join("a")).unwrap();
+        fs::create_dir(home.join("b")).unwrap();
+        let targets = BTreeSet::from([home.join("a"), home.join("b")]);
+        assert_eq!(compact(targets.clone(), &home), targets);
+    }
+
+    #[test]
+    fn linux_presets_add_temp_read_group() {
+        let f = Fixture::new("");
+        fs::create_dir_all(f.home.join("repo/.git")).unwrap();
+        let mut d = discover(&f.home.join("repo"), &f.dirs, false).unwrap();
+        d.detect(&f.dirs, false).unwrap();
+        let linux = Platform {
+            linux: true,
+            ..Platform::default()
+        };
+        let r = resolve(&d, &f.dirs, linux, None, &[]).unwrap();
+        assert_eq!(r.nono.groups, ["linux_temp_read"]);
+        let r = resolve(&d, &f.dirs, Platform::default(), None, &[]).unwrap();
+        assert_eq!(r.nono.groups, [] as [String; 0]);
     }
 
     #[test]

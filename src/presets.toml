@@ -3,10 +3,13 @@
 
 agent = "claude"
 
+[when.linux]
+sandbox.nono.groups = ["linux_temp_read"]
+
 [agents.claude]
 kind = "claude"
 command = "claude"
-sandbox.nono.profile = "claude-code"
+sandbox.nono.profile = "cb:claude"           # built into cb, no `nono pull` needed
 
 [agents.codex]
 command = "codex"

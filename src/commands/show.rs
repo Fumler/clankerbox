@@ -20,6 +20,7 @@ struct Report<'a> {
     policy: &'a Policy,
     base_access: Vec<String>,
     full_access: Vec<String>,
+    notes: Vec<String>,
     nono: &'a NonoConfig,
     generated_files: &'a [GeneratedFile],
     command: Vec<String>,
@@ -77,6 +78,7 @@ pub fn show(run: &RunArgs, json: bool) -> Result<()> {
         policy: &resolved.policy,
         base_access: backend.base_access(),
         full_access,
+        notes: backend.notes(),
         nono: &resolved.nono,
         generated_files: &launch.files,
         command: std::iter::once(&launch.program)
@@ -142,7 +144,7 @@ pub fn show(run: &RunArgs, json: bool) -> Result<()> {
 
 fn print_sandbox_rules(report: &Report<'_>) {
     if report.full_access.is_empty() {
-        for line in &report.base_access {
+        for line in report.base_access.iter().chain(&report.notes) {
             println!("  {DIM}{line}{DIM:#}");
         }
         return;
@@ -150,5 +152,8 @@ fn print_sandbox_rules(report: &Report<'_>) {
     println!("{LABEL}sandbox rules{LABEL:#} {DIM}(from the backend; [user] are cb's){DIM:#}");
     for line in &report.full_access {
         println!("  {line}");
+    }
+    for line in &report.notes {
+        println!("  {DIM}{line}{DIM:#}");
     }
 }

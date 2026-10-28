@@ -80,8 +80,36 @@ impl Env {
     }
 }
 
-fn lines(s: &str) -> Vec<&str> {
-    s.lines().collect()
+/// Without cb's Claude plugin args, and with generated profiles that only add the preset
+/// `linux_temp_read` group shown as the profile they extend.
+fn lines(s: &str) -> Vec<String> {
+    let cb = assert_cmd::cargo::cargo_bin("cb");
+    let plugin = |l: &&str| l.contains("/claude-plugin/") || Path::new(l) == cb;
+    let lines: Vec<_> = s.lines().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if lines.get(i + 1).is_some_and(plugin) {
+            i += 2;
+        } else {
+            out.push(base_profile(lines[i]).unwrap_or_else(|| lines[i].to_owned()));
+            i += 1;
+        }
+    }
+    out
+}
+
+fn base_profile(line: &str) -> Option<String> {
+    if !line.contains("/clankerbox/profiles/") {
+        return None;
+    }
+    let profile: serde_json::Value = serde_json::from_str(&fs::read_to_string(line).ok()?).ok()?;
+    let [base] = profile["extends"].as_array()?.as_slice() else {
+        return None;
+    };
+    (profile["groups"]["include"] == serde_json::json!(["linux_temp_read"]))
+        .then(|| base.as_str().map(str::to_owned))
+        .flatten()
 }
 
 const PROJECT: &str = r#"
@@ -108,10 +136,12 @@ fn runs_nono_with_project_grants_after_trust() {
     let out = env.stdout(&["--block-net", "--", "--resume"]);
     let repo = env.path("home/repo");
     let frontend = env.path("home/frontend");
+    let out = lines(&out);
+    assert!(out[2].starts_with(env.path("run/clankerbox/profiles").to_str().unwrap()));
     let expected = [
         "run",
         "--profile",
-        "claude-code",
+        &out[2],
         "--allow-cwd",
         "--allow",
         repo.to_str().unwrap(),
@@ -126,7 +156,7 @@ fn runs_nono_with_project_grants_after_trust() {
         "env=from-project",
         &format!("cwd={}", repo.display()),
     ];
-    assert_eq!(lines(&out), expected);
+    assert_eq!(out, expected);
 
     env.write(
         "home/repo/.clankerbox.toml",
@@ -168,8 +198,11 @@ fn agent_flag_and_global_config() {
         "approve_detected = true\n[agents.mine]\ninherits = \"claude\"\nargs = [\"--mine\"]\nsandbox.nono.profile = \"p\"",
     );
     let out = env.stdout(&["-A", "mine"]);
-    assert!(out.contains("--profile\np\n"), "{out}");
-    assert!(out.contains("--\nclaude\n--mine\n"), "{out}");
+    assert!(lines(&out).join("\n").contains("--profile\np\n"), "{out}");
+    assert!(
+        lines(&out).join("\n").contains("--\nclaude\n--mine"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -285,6 +318,8 @@ fn replaces_nclaude() {
             "--profile",
             "nclaude",
             "--allow-cwd",
+            "--read",
+            "/proc",
             "--allow",
             repo.to_str().unwrap(),
             "--",
@@ -310,6 +345,8 @@ fn replaces_nclaude_personal() {
             "--profile",
             "nclaude-personal",
             "--allow-cwd",
+            "--read",
+            "/proc",
             "--allow",
             repo.to_str().unwrap(),
             "--",
@@ -343,6 +380,8 @@ fn replaces_nclaude_with_one_off_grants_and_agent_args() {
             "--profile",
             "nclaude",
             "--allow-cwd",
+            "--read",
+            "/proc",
             "--allow",
             repo.to_str().unwrap(),
             "--allow",
@@ -364,15 +403,15 @@ fn replaces_nclaude_with_one_off_grants_and_agent_args() {
 #[test]
 fn replaces_npi_and_reports_unknown_profiles() {
     let env = nclaude_env();
-    let out = env.stdout(&["-A", "pi"]);
+    let out = lines(&env.stdout(&["-A", "pi"])).join("\n");
     assert!(out.starts_with("run\n--profile\nnpi\n"), "{out}");
     assert!(out.contains("--\npi\n"), "{out}");
 
-    let out = env.stdout(&["-A", "pi", "-p", "personal"]);
+    let out = lines(&env.stdout(&["-A", "pi", "-p", "personal"])).join("\n");
     assert!(out.starts_with("run\n--profile\nnpi-personal\n"), "{out}");
     assert!(out.contains("CLAUDE_CONFIG_DIR="), "{out}");
 
-    let out = env.stdout(&["-p", "personal", "--nono-profile", "other"]);
+    let out = lines(&env.stdout(&["-p", "personal", "--nono-profile", "other"])).join("\n");
     assert!(out.starts_with("wrap\n--profile\nother\n"), "{out}");
 
     env.cmd(&["-p", "nope"])
@@ -454,16 +493,57 @@ fn missing_nono_is_a_clear_error() {
 }
 
 #[test]
+fn claude_uses_builtin_profile_without_pull() {
+    let env = Env::new();
+    let out = env.stdout(&["-y"]);
+    let profile = lines(&out)[2].clone();
+    let all: Vec<_> = out.lines().collect();
+    let plugin = all[all.iter().position(|l| *l == "--plugin-dir").unwrap() + 1];
+    assert!(Path::new(plugin).join("hooks/hooks.json").is_file());
+    assert!(out.contains(&format!("--read\n{plugin}\n")));
+    assert!(env.stdout(&["show"]).contains("explains sandbox denials"));
+    let json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(profile).unwrap()).unwrap();
+    assert_eq!(json["extends"], "default");
+    assert!(
+        json["filesystem"]["allow"]
+            .as_array()
+            .unwrap()
+            .contains(&"$HOME/.claude".into())
+    );
+    for dir in [
+        "home/.claude",
+        "home/.cache/claude",
+        "home/.local/state/claude/locks",
+        "run/cc-socks",
+    ] {
+        assert!(env.path(dir).is_dir(), "{dir}");
+    }
+    let mode = fs::metadata(env.path("run/cc-socks"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o700);
+
+    env.cmd(&["-y", "--nono-profile", "cb:nope"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "unknown built-in nono profile `cb:nope` (known: cb:claude)",
+        ));
+}
+
+#[test]
 fn missing_nono_profile_suggests_pull() {
     let env = Env::new();
-    env.cmd(&[])
+    env.cmd(&["-y", "--nono-profile", "claude-code"])
         .env("CB_STUB_MISSING", "claude-code")
         .assert()
         .failure()
         .stderr(predicate::str::contains(
             "nono profile `claude-code` is not installed; run `nono pull nolabs-ai/claude`",
         ));
-    env.cmd(&["--nono-profile", "custom"])
+    env.cmd(&["-y", "--nono-profile", "custom"])
         .env("CB_STUB_MISSING", "custom")
         .assert()
         .failure()
@@ -474,12 +554,19 @@ fn missing_nono_profile_suggests_pull() {
 fn dry_run_prints_command_without_running() {
     let env = nclaude_env();
     let repo = env.path("home/repo");
-    env.write("home/repo/.clankerbox.toml", "");
+    env.write(
+        "home/repo/.clankerbox.toml",
+        "[sandbox.nono]\nexplain_denials = false",
+    );
     let out = env.stdout(&["--dry-run", "--read", "../x y", "--", "--resume", "id"]);
+    let out: Vec<_> = out
+        .split(' ')
+        .map(|w| base_profile(w).unwrap_or_else(|| w.to_owned()))
+        .collect();
     assert_eq!(
-        out,
+        out.join(" "),
         format!(
-            "HERDR_AGENT=claude nono wrap --profile nclaude --allow-cwd --allow {} \
+            "HERDR_AGENT=claude nono wrap --profile nclaude --allow-cwd --read /proc --allow {} \
              --read '../x y' -- claude --resume id\n",
             repo.display()
         )
@@ -591,5 +678,40 @@ fn auto_approved_cache_grants_are_warned_about() {
         .success()
         .stderr(predicate::str::contains(
             "write access to shared caches: ~/.cargo/registry",
+        ));
+}
+
+#[test]
+fn hook_explains_denials_and_ignores_bad_input() {
+    let env = Env::new();
+    let denied = r#"{"hook_event_name":"PostToolUseFailure","error":"Permission denied"}"#;
+    let out = env
+        .cmd(&["hook", "explain-denial"])
+        .write_stdin(denied)
+        .assert()
+        .success();
+    let out: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert_eq!(
+        out["hookSpecificOutput"]["hookEventName"],
+        "PostToolUseFailure"
+    );
+    for input in [r#"{"error":"no such file"}"#, "not json"] {
+        env.cmd(&["hook", "explain-denial"])
+            .write_stdin(input)
+            .assert()
+            .success()
+            .stdout("");
+    }
+}
+
+#[test]
+fn doctor_checks_profile_paths() {
+    let env = Env::new();
+    env.cmd(&["doctor", "--nono-profile", "./typo.json"])
+        .env("CB_STUB_MISSING", "./typo.json")
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains(
+            "nono profile `./typo.json` not found",
         ));
 }

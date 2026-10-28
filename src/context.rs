@@ -12,6 +12,8 @@ pub struct Dirs {
     pub state: PathBuf,
     /// `$XDG_RUNTIME_DIR/clankerbox`, falling back to `$XDG_CACHE_HOME/clankerbox`.
     pub runtime: PathBuf,
+    /// `$CLAUDE_CONFIG_DIR`.
+    pub claude_config: Option<PathBuf>,
 }
 
 impl Dirs {
@@ -38,6 +40,7 @@ impl Dirs {
             config: xdg("XDG_CONFIG_HOME", ".config"),
             state: xdg("XDG_STATE_HOME", ".local/state"),
             runtime,
+            claude_config: env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from),
             home,
         })
     }

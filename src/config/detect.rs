@@ -98,7 +98,11 @@ const TOOLCHAINS: &[Toolchain] = &[
             "settings.gradle.kts",
         ],
         groups: &["java_runtime"],
-        allow: &["${env:GRADLE_USER_HOME:-${home}/.gradle}"],
+        allow: &[
+            "${env:GRADLE_USER_HOME:-${home}/.gradle}",
+            // JGit-based plugins write filesystem timestamp probes here.
+            "${env:XDG_CONFIG_HOME:-${home}/.config}/jgit",
+        ],
         ..NONE
     },
     Toolchain {
@@ -260,7 +264,14 @@ mod tests {
                 "${env:XDG_CONFIG_HOME:-${home}/.config}/direnv",
             ]
         );
-        assert_eq!(file.sandbox.allow.len(), 2);
+        assert_eq!(
+            file.sandbox.allow,
+            [
+                "${home}/.m2/repository",
+                "${env:GRADLE_USER_HOME:-${home}/.gradle}",
+                "${env:XDG_CONFIG_HOME:-${home}/.config}/jgit",
+            ]
+        );
     }
 
     #[test]

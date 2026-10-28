@@ -1,19 +1,93 @@
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::fs::DirBuilder;
+use std::os::unix::fs::DirBuilderExt;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 
-use super::{Confirm, GeneratedFile, Launch, Request, Sandbox};
+use super::{Confirm, GeneratedFile, Launch, Request, Sandbox, claude_plugin};
 use crate::config::discover::hash;
 use crate::config::model::{NonoConfig, NonoMode};
 use crate::context;
 use crate::policy::{Access, Network};
 
 const DEFAULT_PROFILE: &str = "default";
+// nono rejects `:` in names, so these can't clash.
+const BUILTIN_PREFIX: &str = "cb:";
+
+struct Builtin {
+    name: &'static str,
+    profile: &'static str,
+    // Created before each run: Landlock and Seatbelt drop grants for missing paths.
+    home_dirs: &'static [&'static str],
+    runtime_dirs: &'static [&'static str],
+}
+
+const BUILTINS: &[Builtin] = &[Builtin {
+    name: "claude",
+    // nolabs-ai/claude, minus its session hook.
+    profile: include_str!("profiles/claude.json"),
+    home_dirs: &[".claude", ".cache/claude", ".local/state/claude/locks"],
+    runtime_dirs: &["cc-socks"],
+}];
+
+fn builtin(profile: &str) -> Result<Option<&'static Builtin>> {
+    let Some(name) = profile.strip_prefix(BUILTIN_PREFIX) else {
+        return Ok(None);
+    };
+    let found = BUILTINS.iter().find(|b| b.name == name);
+    let known: Vec<_> = BUILTINS.iter().map(|b| b.name).collect();
+    found.map(Some).with_context(|| {
+        format!(
+            "unknown built-in nono profile `{profile}` (known: {BUILTIN_PREFIX}{})",
+            known.join(&format!(", {BUILTIN_PREFIX}"))
+        )
+    })
+}
+
+pub fn check_profile(profile: &str) -> Result<()> {
+    match status(profile)? {
+        Status::Found => Ok(()),
+        Status::Missing(pack) => Err(missing(profile, pack)),
+    }
+}
+
+enum Status {
+    Found,
+    /// With the registry pack providing it, if any.
+    Missing(Option<&'static str>),
+}
+
+fn status(profile: &str) -> Result<Status> {
+    if builtin(profile)?.is_some() || profile_installed(profile) {
+        return Ok(Status::Found);
+    }
+    Ok(Status::Missing(registry_pack(profile)))
+}
+
+fn missing(profile: &str, pack: Option<&str>) -> anyhow::Error {
+    match pack {
+        Some(pack) => {
+            anyhow::anyhow!("nono profile `{profile}` is not installed; run `nono pull {pack}`")
+        }
+        None => anyhow::anyhow!("nono profile `{profile}` not found (see `nono profile list`)"),
+    }
+}
+
+/// nono profile names are alphanumeric with hyphens, and pack refs add one `/`.
+fn is_file(profile: &str) -> bool {
+    profile.starts_with(['/', '.', '~'])
+        || Path::new(profile)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+}
 
 pub struct Nono {
     pub options: NonoConfig,
+    pub agent_kind: Option<String>,
+    pub cb: PathBuf,
+    pub home: PathBuf,
     pub runtime_dir: PathBuf,
 }
 
@@ -36,6 +110,34 @@ fn profile_installed(profile: &str) -> bool {
         .is_ok_and(|s| s.success())
 }
 
+impl Nono {
+    fn with_groups(&self, profile: &str, name: &str) -> Result<serde_json::Value> {
+        let mut profile: serde_json::Value =
+            serde_json::from_str(profile).with_context(|| format!("{name}: invalid JSON"))?;
+        if !profile.is_object() {
+            bail!("{name}: not a JSON object");
+        }
+        let include = &mut profile["groups"]["include"];
+        if include.is_null() {
+            *include = serde_json::json!([]);
+        }
+        include
+            .as_array_mut()
+            .with_context(|| format!("{name}: `groups.include` is not a list"))?
+            .extend(self.options.groups.iter().map(|g| g.as_str().into()));
+        Ok(profile)
+    }
+
+    // `nono wrap` grants /proc/self to the first process only: nolabs-ai/nono#1984.
+    fn wrap_needs_proc(&self) -> bool {
+        cfg!(target_os = "linux") && self.options.mode == Some(NonoMode::Direct)
+    }
+
+    fn explain_denials(&self) -> bool {
+        self.agent_kind.as_deref() == Some("claude") && self.options.explain_denials != Some(false)
+    }
+}
+
 impl Sandbox for Nono {
     fn preflight(&self, confirm: Confirm<'_>) -> Result<()> {
         if context::which("nono").is_none() {
@@ -44,11 +146,17 @@ impl Sandbox for Nono {
         let Some(profile) = self.options.profile.as_deref() else {
             return Ok(());
         };
-        if profile.contains('/') || profile_installed(profile) {
+        if let Some(builtin) = builtin(profile)? {
+            return create_dirs(&self.home, builtin);
+        }
+        // `build` reads profile files, relative to the agent's directory.
+        if is_file(profile) {
             return Ok(());
         }
-        let Some(pack) = registry_pack(profile) else {
-            bail!("nono profile `{profile}` not found (see `nono profile list`)");
+        let pack = match status(profile)? {
+            Status::Found => return Ok(()),
+            Status::Missing(None) => return Err(missing(profile, None)),
+            Status::Missing(Some(pack)) => pack,
         };
         let question =
             format!("nono profile `{profile}` is not installed. Run `nono pull {pack}`?");
@@ -64,7 +172,7 @@ impl Sandbox for Nono {
                 Ok(())
             }
             Some(false) => bail!("nono profile `{profile}` is not installed"),
-            None => bail!("nono profile `{profile}` is not installed; run `nono pull {pack}`"),
+            None => Err(missing(profile, Some(pack))),
         }
     }
 
@@ -77,12 +185,27 @@ impl Sandbox for Nono {
         };
         let mut args: Vec<OsString> = vec![subcommand.into()];
 
-        // nono has no flag for policy groups, so they need a generated profile.
-        if !self.options.groups.is_empty() {
-            let profile = serde_json::json!({
-                "extends": [base.unwrap_or(DEFAULT_PROFILE)],
-                "groups": { "include": self.options.groups },
-            });
+        // nono takes no group flags and can't extend a profile file, so groups are merged into
+        // a copy of a built-in profile or profile file.
+        let builtin = base.map(builtin).transpose()?.flatten();
+        let base_file = base.filter(|b| builtin.is_none() && is_file(b));
+        if builtin.is_some() || !self.options.groups.is_empty() {
+            let profile = match (builtin, base_file) {
+                (Some(builtin), _) => self.with_groups(builtin.profile, "built-in profile")?,
+                (None, Some(file)) => {
+                    let path = match file.strip_prefix("~/") {
+                        Some(rest) => self.home.join(rest),
+                        None => request.cwd.join(file),
+                    };
+                    let contents = std::fs::read_to_string(&path)
+                        .with_context(|| format!("cannot read nono profile {}", path.display()))?;
+                    self.with_groups(&contents, &path.display().to_string())?
+                }
+                (None, None) => serde_json::json!({
+                    "extends": [base.unwrap_or(DEFAULT_PROFILE)],
+                    "groups": { "include": self.options.groups },
+                }),
+            };
             let contents = serde_json::to_string_pretty(&profile)?;
             let path = self
                 .runtime_dir
@@ -99,6 +222,9 @@ impl Sandbox for Nono {
 
         let policy = request.policy;
         args.push("--allow-cwd".into());
+        if self.wrap_needs_proc() {
+            args.extend(["--read".into(), "/proc".into()]);
+        }
         for grant in &policy.grants {
             let flag = match (grant.access, grant.file) {
                 (Access::Read, false) => "--read",
@@ -121,10 +247,22 @@ impl Sandbox for Nono {
                 args.extend([flag.into(), port.to_string().into()]);
             }
         }
+        let plugin = self.explain_denials().then(|| {
+            let (dir, plugin_files) = claude_plugin::generate(&self.runtime_dir, &self.cb);
+            files.extend(plugin_files);
+            args.extend(["--read".into(), dir.clone().into()]);
+            if self.cb.is_absolute() {
+                args.extend(["--read-file".into(), self.cb.clone().into()]);
+            }
+            dir
+        });
         args.extend(policy.extra_args.iter().map(OsString::from));
         args.extend(request.passthrough.iter().cloned());
         args.push("--".into());
         args.push(request.program.into());
+        if let Some(dir) = plugin {
+            args.extend(["--plugin-dir".into(), dir.into()]);
+        }
         args.extend(request.args.iter().cloned());
 
         Ok(Launch {
@@ -146,12 +284,31 @@ impl Sandbox for Nono {
         } else {
             format!(" (groups: {})", self.options.groups.join(", "))
         };
-        vec![
+        let mut lines = vec![
             format!(
                 "plus everything nono profile {} allows{groups}",
                 profiles.join(", ")
             ),
             "nono lists every rule when it starts; `cb show` lists them now".to_owned(),
+        ];
+        if self.wrap_needs_proc() {
+            lines.push(
+                "plus read access to /proc, which direct mode needs for child processes; \
+                 other processes' command lines become readable"
+                    .to_owned(),
+            );
+        }
+        lines
+    }
+
+    fn notes(&self) -> Vec<String> {
+        if !self.explain_denials() {
+            return Vec::new();
+        }
+        vec![
+            "loads cb's Claude Code plugin, which explains sandbox denials to Claude (read access \
+             to it and to cb); turn off with `sandbox.nono.explain_denials = false`"
+                .to_owned(),
         ]
     }
 
@@ -186,9 +343,27 @@ impl Sandbox for Nono {
     }
 }
 
+fn create_dirs(home: &Path, builtin: &Builtin) -> Result<()> {
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute());
+    let home_dirs = builtin.home_dirs.iter().map(|d| home.join(d));
+    let runtime_dirs = runtime
+        .iter()
+        .flat_map(|r| builtin.runtime_dirs.iter().map(move |d| r.join(d)));
+    for dir in home_dirs.chain(runtime_dirs) {
+        DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&dir)
+            .with_context(|| format!("cannot create {}", dir.display()))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::fs;
 
     use super::*;
     use crate::policy::{Grant, Policy, Source};
@@ -198,6 +373,10 @@ mod tests {
     }
 
     fn build(options: NonoConfig, passthrough: &[&str]) -> Launch {
+        build_for(None, options, passthrough)
+    }
+
+    fn build_for(kind: Option<&str>, options: NonoConfig, passthrough: &[&str]) -> Launch {
         let mut policy = Policy::default();
         policy.grant(Grant {
             path: "/repo".into(),
@@ -218,6 +397,9 @@ mod tests {
         policy.extra_args = vec!["--allow-gpu".into()];
         let nono = Nono {
             options,
+            agent_kind: kind.map(Into::into),
+            cb: "/bin/cb".into(),
+            home: PathBuf::new(),
             runtime_dir: "/run/cb".into(),
         };
         nono.build(&Request {
@@ -247,6 +429,9 @@ mod tests {
                 groups: vec!["rust_runtime".into()],
                 ..NonoConfig::default()
             },
+            agent_kind: None,
+            cb: PathBuf::new(),
+            home: PathBuf::new(),
             runtime_dir: PathBuf::new(),
         };
         assert_eq!(
@@ -266,6 +451,7 @@ mod tests {
                 profile: Some("claude-code".into()),
                 extends: vec!["wsl".into()],
                 groups: vec![],
+                explain_denials: None,
             },
             &["--read", "/tmp/x"],
         );
@@ -309,5 +495,150 @@ mod tests {
             serde_json::json!(["node_runtime"])
         );
         assert_eq!(args(&launch)[2], file.path.to_string_lossy());
+    }
+
+    #[test]
+    fn builtin_profile_is_written_with_groups_merged() {
+        let launch = build(
+            NonoConfig {
+                profile: Some("cb:claude".into()),
+                groups: vec!["go_runtime".into()],
+                ..Default::default()
+            },
+            &[],
+        );
+        let [file] = &launch.files[..] else {
+            panic!("expected one file")
+        };
+        assert_eq!(args(&launch)[2], file.path.to_string_lossy());
+        let profile: serde_json::Value = serde_json::from_str(&file.contents).unwrap();
+        assert_eq!(profile["extends"], "default");
+        assert!(profile.get("session_hooks").is_none());
+        let groups = profile["groups"]["include"].as_array().unwrap();
+        assert!(groups.contains(&"git_config".into()));
+        assert_eq!(groups.last().unwrap(), "go_runtime");
+    }
+
+    #[test]
+    fn builtin_profiles_parse_and_unknown_ones_fail() {
+        for b in BUILTINS {
+            let _: serde_json::Value = serde_json::from_str(b.profile).unwrap();
+        }
+        assert!(builtin("claude").unwrap().is_none());
+        assert!(builtin("cb:claude").unwrap().is_some());
+        assert!(builtin("cb:other").is_err());
+    }
+
+    #[test]
+    fn claude_gets_denial_plugin_read_only_unless_disabled() {
+        let launch = build_for(Some("claude"), NonoConfig::default(), &[]);
+        let argv = args(&launch);
+        let dir = &argv[argv.iter().position(|a| a == "--plugin-dir").unwrap() + 1];
+        assert!(dir.starts_with("/run/cb/claude-plugin/"));
+        let program = argv.iter().position(|a| a == "claude").unwrap();
+        assert_eq!(argv[program + 1], "--plugin-dir");
+        let read = argv
+            .windows(2)
+            .position(|w| w[0] == "--read" && w[1] == *dir);
+        assert!(read.unwrap() < program);
+        assert!(argv.windows(2).any(|w| w == ["--read-file", "/bin/cb"]));
+        for file in [".claude-plugin/plugin.json", "hooks/hooks.json"] {
+            assert!(
+                launch
+                    .files
+                    .iter()
+                    .any(|f| f.path == Path::new(dir).join(file)),
+                "{file}"
+            );
+        }
+        for f in launch
+            .files
+            .iter()
+            .filter(|f| f.path.extension().is_some_and(|e| e == "json"))
+        {
+            let _: serde_json::Value = serde_json::from_str(&f.contents).unwrap();
+        }
+
+        let off = NonoConfig {
+            explain_denials: Some(false),
+            ..NonoConfig::default()
+        };
+        for launch in [
+            build_for(Some("claude"), off, &[]),
+            build(NonoConfig::default(), &[]),
+        ] {
+            assert!(!args(&launch).contains(&"--plugin-dir".to_owned()));
+            assert!(launch.files.is_empty());
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn direct_mode_reads_proc() {
+        let direct = NonoConfig {
+            mode: Some(NonoMode::Direct),
+            ..NonoConfig::default()
+        };
+        let launch = build(direct.clone(), &[]);
+        assert!(args(&launch).windows(2).any(|w| w == ["--read", "/proc"]));
+        let nono = Nono {
+            options: direct,
+            agent_kind: None,
+            cb: PathBuf::new(),
+            home: PathBuf::new(),
+            runtime_dir: PathBuf::new(),
+        };
+        assert!(nono.base_access().iter().any(|l| l.contains("/proc")));
+
+        let launch = build(NonoConfig::default(), &[]);
+        assert!(!args(&launch).contains(&"/proc".to_owned()));
+    }
+
+    #[test]
+    fn groups_are_merged_into_profile_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("mine.json"),
+            r#"{"extends": "default", "filesystem": {"read": ["/x"]}}"#,
+        )
+        .unwrap();
+        fs::write(tmp.path().join("bad.json"), "[]").unwrap();
+        let nono = |profile: &str, groups: &[&str]| Nono {
+            options: NonoConfig {
+                profile: Some(profile.into()),
+                groups: groups.iter().map(|g| (*g).into()).collect(),
+                ..NonoConfig::default()
+            },
+            agent_kind: None,
+            cb: PathBuf::new(),
+            home: PathBuf::new(),
+            runtime_dir: "/run/cb".into(),
+        };
+        let build = |nono: Nono| {
+            nono.build(&Request {
+                policy: &Policy::default(),
+                passthrough: &[],
+                program: "claude",
+                args: Vec::new(),
+                cwd: tmp.path(),
+            })
+        };
+
+        let launch = build(nono("./mine.json", &["go_runtime"])).unwrap();
+        let [file] = &launch.files[..] else {
+            panic!("expected one file")
+        };
+        let profile: serde_json::Value = serde_json::from_str(&file.contents).unwrap();
+        assert_eq!(profile["extends"], "default");
+        assert_eq!(profile["filesystem"]["read"], serde_json::json!(["/x"]));
+        assert_eq!(
+            profile["groups"]["include"],
+            serde_json::json!(["go_runtime"])
+        );
+
+        let launch = build(nono("./mine.json", &[])).unwrap();
+        assert_eq!(args(&launch)[1..3], ["--profile", "./mine.json"]);
+        assert!(build(nono("./bad.json", &["go_runtime"])).is_err());
+        assert!(build(nono("./missing.json", &["go_runtime"])).is_err());
     }
 }

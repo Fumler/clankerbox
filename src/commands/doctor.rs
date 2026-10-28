@@ -8,6 +8,7 @@ use crate::cli::GlobalOpts;
 use crate::config::discover::Origin;
 use crate::config::model::BackendKind;
 use crate::context;
+use crate::sandbox;
 use crate::style::{ERROR, OK};
 
 #[derive(Default)]
@@ -103,16 +104,8 @@ pub fn doctor(opts: &GlobalOpts) -> Result<ExitCode> {
 }
 
 fn check_profile(report: &mut Report, profile: &str) {
-    let found = Command::new("nono")
-        .args(["profile", "show", profile])
-        .output()
-        .is_ok_and(|out| out.status.success());
-    if found {
-        report.ok(format!("nono profile `{profile}`"));
-    } else {
-        report.fail(format!(
-            "nono profile `{profile}` not found or invalid; check `nono profile show {profile}`, \
-             or install it (`nono search`, `nono pull <pack>`)"
-        ));
+    match sandbox::check_nono_profile(profile) {
+        Ok(()) => report.ok(format!("nono profile `{profile}`")),
+        Err(e) => report.fail(e),
     }
 }
