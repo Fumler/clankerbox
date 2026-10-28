@@ -20,6 +20,42 @@ You can call nono directly, but then you pass the right flags on every run. `cb`
 > Largely written with AI (Claude Code) under human direction and review. Check `cb show` before
 > trusting what a run grants.
 
+## Installation
+
+On Linux or macOS, install the latest release with:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Fumler/clankerbox/main/install.sh | bash
+```
+
+It installs `cb` to `~/.local/bin` on Linux or `/usr/local/bin` on macOS (using `sudo` if that
+isn't writable). Set `CB_INSTALL_DIR` to install elsewhere:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Fumler/clankerbox/main/install.sh | CB_INSTALL_DIR=~/bin bash
+```
+
+With Nix:
+
+```sh
+nix profile install github:Fumler/clankerbox   # or try it: nix run github:Fumler/clankerbox
+```
+
+Or add it as a flake input:
+
+```nix
+inputs.clankerbox.url = "github:Fumler/clankerbox";
+
+# in environment.systemPackages or home.packages:
+inputs.clankerbox.packages.${pkgs.stdenv.hostPlatform.system}.default
+```
+
+To reuse your own nixpkgs, add `inputs.clankerbox.inputs.nixpkgs.follows = "nixpkgs";`. Its Rust
+must be at least the `rust-version` in `Cargo.toml`, which usually means nixpkgs unstable.
+
+Archives for each platform are also on the
+[releases page](https://github.com/Fumler/clankerbox/releases).
+
 ## Quickstart
 
 1. Install [nono](https://nono.sh). Claude Code needs nothing else: cb ships its nono profile.
@@ -31,8 +67,7 @@ You can call nono directly, but then you pass the right flags on every run. `cb`
 
    If you skip this, `cb` offers to run it for you.
 
-2. Install `cb` from a [release](https://github.com/Fumler/clankerbox/releases) or with Nix
-   (`nix profile install github:Fumler/clankerbox`), then check the setup with `cb doctor`.
+2. [Install `cb`](#installation), then check the setup with `cb doctor`.
 
 3. Run it in a project. With no config at all, `cb` runs Claude Code sandboxed to that project:
 
