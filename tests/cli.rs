@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -6,7 +7,7 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::TempDir;
 
-/// Prints args, selected env vars and cwd, one per line. `profile show` fails for profiles in
+/// Prints args, `$CB_TEST_ENV` and cwd, one per line. `profile show` fails for profiles in
 /// `CB_STUB_MISSING`.
 const STUB: &str = r#"#!/bin/sh
 if [ "$2 $3 $4" = "--dry-run -v --log-file" ]; then
@@ -19,10 +20,6 @@ if [ "$1 $2" = "profile show" ]; then
 fi
 for a in "$@"; do printf '%s\n' "$a"; done
 printf 'env=%s\n' "$CB_TEST_ENV"
-for var in HERDR_AGENT CLAUDE_CONFIG_DIR; do
-  eval "value=\${$var-}"
-  [ -n "$value" ] && printf '%s=%s\n' "$var" "$value"
-done
 printf 'cwd=%s\n' "$PWD"
 "#;
 
@@ -80,36 +77,59 @@ impl Env {
     }
 }
 
-/// Without cb's Claude plugin args, and with generated profiles that only add the preset
-/// `linux_temp_read` group shown as the profile they extend.
-fn lines(s: &str) -> Vec<String> {
-    let cb = assert_cmd::cargo::cargo_bin("cb");
-    let plugin = |l: &&str| l.contains("/claude-plugin/") || Path::new(l) == cb;
-    let lines: Vec<_> = s.lines().collect();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < lines.len() {
-        if lines.get(i + 1).is_some_and(plugin) {
-            i += 2;
-        } else {
-            out.push(base_profile(lines[i]).unwrap_or_else(|| lines[i].to_owned()));
-            i += 1;
-        }
-    }
-    out
+/// What the stub `nono` printed: its own arguments, the agent command with its arguments, and
+/// the `env=`/`cwd=` lines.
+struct Run {
+    nono: Vec<String>,
+    agent: Vec<String>,
+    tail: Vec<String>,
 }
 
-fn base_profile(line: &str) -> Option<String> {
-    if !line.contains("/clankerbox/profiles/") {
-        return None;
+fn run(out: &str) -> Run {
+    let lines: Vec<String> = out.lines().map(str::to_owned).collect();
+    let sep = lines.iter().position(|l| l == "--").expect("no `--`");
+    let tail = lines
+        .iter()
+        .position(|l| l.starts_with("env="))
+        .expect("no env line");
+    Run {
+        nono: lines[..sep].to_vec(),
+        agent: lines[sep + 1..tail].to_vec(),
+        tail: lines[tail..].to_vec(),
     }
-    let profile: serde_json::Value = serde_json::from_str(&fs::read_to_string(line).ok()?).ok()?;
-    let [base] = profile["extends"].as_array()?.as_slice() else {
-        return None;
-    };
-    (profile["groups"]["include"] == serde_json::json!(["linux_temp_read"]))
-        .then(|| base.as_str().map(str::to_owned))
-        .flatten()
+}
+
+impl Run {
+    fn has(&self, flag: &str, value: &str) -> bool {
+        self.nono.windows(2).any(|w| w[0] == flag && w[1] == value)
+    }
+
+    fn value(&self, flag: &str) -> &str {
+        let at = self.nono.iter().position(|a| a == flag).expect(flag);
+        &self.nono[at + 1]
+    }
+
+    /// nono's flags after the subcommand, each with its value if it takes one.
+    fn flags(&self) -> BTreeSet<(String, Option<String>)> {
+        let mut out = BTreeSet::new();
+        let mut args = self.nono[1..].iter().peekable();
+        while let Some(flag) = args.next() {
+            let value = args.next_if(|v| !v.starts_with("--")).cloned();
+            out.insert((flag.clone(), value));
+        }
+        out
+    }
+
+    /// The `--profile` value, or what cb's generated profile extends.
+    fn base_profile(&self) -> String {
+        let profile = self.value("--profile");
+        if !profile.contains("/clankerbox/profiles/") {
+            return profile.to_owned();
+        }
+        let json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(profile).unwrap()).unwrap();
+        json["extends"][0].as_str().unwrap_or_default().to_owned()
+    }
 }
 
 const PROJECT: &str = r#"
@@ -136,27 +156,23 @@ fn runs_nono_with_project_grants_after_trust() {
     let out = env.stdout(&["--block-net", "--", "--resume"]);
     let repo = env.path("home/repo");
     let frontend = env.path("home/frontend");
-    let out = lines(&out);
-    assert!(out[2].starts_with(env.path("run/clankerbox/profiles").to_str().unwrap()));
-    let expected = [
-        "run",
-        "--profile",
-        &out[2],
-        "--allow-cwd",
-        "--allow",
-        repo.to_str().unwrap(),
-        "--read",
-        frontend.to_str().unwrap(),
-        "--block-net",
-        "--",
-        "claude",
-        "--model",
-        "opus",
-        "--resume",
-        "env=from-project",
-        &format!("cwd={}", repo.display()),
-    ];
-    assert_eq!(out, expected);
+    let r = run(&out);
+    assert_eq!(r.nono[0], "run");
+    assert!(r.has("--allow", repo.to_str().unwrap()));
+    assert!(r.has("--read", frontend.to_str().unwrap()));
+    assert!(r.nono.contains(&"--block-net".to_owned()));
+    assert_eq!(r.agent[0], "claude");
+    assert!(
+        r.agent
+            .ends_with(&["--model".into(), "opus".into(), "--resume".into()])
+    );
+    assert_eq!(
+        r.tail,
+        [
+            "env=from-project".to_owned(),
+            format!("cwd={}", repo.display())
+        ]
+    );
 
     env.write(
         "home/repo/.clankerbox.toml",
@@ -197,12 +213,10 @@ fn agent_flag_and_global_config() {
         "config/clankerbox/config.toml",
         "approve_detected = true\n[agents.mine]\ninherits = \"claude\"\nargs = [\"--mine\"]\nsandbox.nono.profile = \"p\"",
     );
-    let out = env.stdout(&["-A", "mine"]);
-    assert!(lines(&out).join("\n").contains("--profile\np\n"), "{out}");
-    assert!(
-        lines(&out).join("\n").contains("--\nclaude\n--mine"),
-        "{out}"
-    );
+    let r = run(&env.stdout(&["-A", "mine"]));
+    assert_eq!(r.base_profile(), "p");
+    assert_eq!(r.agent[0], "claude");
+    assert!(r.agent.ends_with(&["--mine".into()]));
 }
 
 #[test]
@@ -274,151 +288,102 @@ fn unknown_subcommand_and_schema() {
     assert!(schema["properties"]["sandbox"].is_object());
 }
 
-/// Config replacing `nclaude`-style shell wrappers around `nono wrap`.
-const NCLAUDE_CONFIG: &str = r#"
-approve_detected = true
+/// Every flag a default run passes to nono. A new default grant must be added here on purpose.
+#[test]
+fn default_run_passes_only_expected_flags() {
+    for direct in [false, true] {
+        let env = Env::new();
+        if direct {
+            env.write(
+                "config/clankerbox/config.toml",
+                "[sandbox.nono]\nmode = \"direct\"",
+            );
+        }
+        let r = run(&env.stdout(&["-y"]));
+        let profile = r.value("--profile").to_owned();
+        assert!(profile.starts_with(env.path("run/clankerbox/profiles").to_str().unwrap()));
+        assert_eq!(r.agent[..2], ["claude", "--plugin-dir"]);
+        let plugin = r.agent[2].clone();
+        assert!(plugin.starts_with(env.path("run/clankerbox/claude-plugin").to_str().unwrap()));
+        assert_eq!(r.agent.len(), 3);
 
-[agents.claude]
-sandbox.nono.profile = "nclaude"
-sandbox.nono.mode = "direct"
-sandbox.env = { HERDR_AGENT = "claude" }
+        let cb = assert_cmd::cargo::cargo_bin("cb").canonicalize().unwrap();
+        let pair = |flag: &str, value: &str| (flag.to_owned(), Some(value.to_owned()));
+        let mut expected = BTreeSet::from([
+            pair("--profile", &profile),
+            ("--allow-cwd".to_owned(), None),
+            pair("--allow", env.path("home/repo").to_str().unwrap()),
+            pair("--read", &plugin),
+            pair("--read-file", cb.to_str().unwrap()),
+        ]);
+        if direct && cfg!(target_os = "linux") {
+            expected.insert(pair("--read", "/proc"));
+        }
+        assert_eq!(r.nono[0], if direct { "wrap" } else { "run" });
+        assert_eq!(r.flags(), expected, "direct: {direct}");
+    }
+}
 
-[agents.pi]
-sandbox.nono.profile = "npi"
-
-[agents.omp]
-sandbox.nono.profile = "nomp"
-
-[profiles.personal]
-sandbox.env = { CLAUDE_CONFIG_DIR = "${home}/.claude-personal" }
-
-[profiles.personal.agents.claude]
-sandbox.nono.profile = "nclaude-personal"
-
-[profiles.personal.agents.pi]
-sandbox.nono.profile = "npi-personal"
-"#;
-
-fn nclaude_env() -> Env {
+#[test]
+fn direct_mode_uses_wrap_and_reads_proc_on_linux() {
     let env = Env::new();
-    env.write("config/clankerbox/config.toml", NCLAUDE_CONFIG);
-    env
-}
-
-/// `nclaude` → `cb`
-#[test]
-fn replaces_nclaude() {
-    let env = nclaude_env();
-    let repo = env.path("home/repo");
-    let out = env.stdout(&[]);
-    assert_eq!(
-        lines(&out),
-        [
-            "wrap",
-            "--profile",
-            "nclaude",
-            "--allow-cwd",
-            "--read",
-            "/proc",
-            "--allow",
-            repo.to_str().unwrap(),
-            "--",
-            "claude",
-            "env=",
-            "HERDR_AGENT=claude",
-            &format!("cwd={}", repo.display()),
-        ]
+    env.write(
+        "config/clankerbox/config.toml",
+        "approve_detected = true\n[sandbox.nono]\nmode = \"direct\"",
     );
+    let r = run(&env.stdout(&[]));
+    assert_eq!(r.nono[0], "wrap");
+    assert_eq!(r.has("--read", "/proc"), cfg!(target_os = "linux"));
 }
 
-/// `nclaude-personal` → `cb -p personal`
 #[test]
-fn replaces_nclaude_personal() {
-    let env = nclaude_env();
-    let repo = env.path("home/repo");
-    let personal = env.path("home/.claude-personal");
-    let out = env.stdout(&["-p", "personal"]);
-    assert_eq!(
-        lines(&out),
-        [
-            "wrap",
-            "--profile",
-            "nclaude-personal",
-            "--allow-cwd",
-            "--read",
-            "/proc",
-            "--allow",
-            repo.to_str().unwrap(),
-            "--",
-            "claude",
-            "env=",
-            "HERDR_AGENT=claude",
-            &format!("CLAUDE_CONFIG_DIR={}", personal.display()),
-            &format!("cwd={}", repo.display()),
-        ]
-    );
-}
-
-/// `nclaude --allow … --read … -- --resume <id>` → same args to `cb`
-#[test]
-fn replaces_nclaude_with_one_off_grants_and_agent_args() {
-    let env = nclaude_env();
-    let repo = env.path("home/repo");
-    let out = env.stdout(&[
+fn one_off_grants_and_agent_args_pass_through() {
+    let env = Env::new();
+    let r = run(&env.stdout(&[
+        "-y",
         "--allow",
         "./some-dir",
         "--read",
-        "../some-other-dir",
+        "../other",
         "--",
         "--resume",
-        "some-claude-session-id",
-    ]);
-    assert_eq!(
-        lines(&out),
-        [
-            "wrap",
-            "--profile",
-            "nclaude",
-            "--allow-cwd",
-            "--read",
-            "/proc",
-            "--allow",
-            repo.to_str().unwrap(),
-            "--allow",
-            "./some-dir",
-            "--read",
-            "../some-other-dir",
-            "--",
-            "claude",
-            "--resume",
-            "some-claude-session-id",
-            "env=",
-            "HERDR_AGENT=claude",
-            &format!("cwd={}", repo.display()),
-        ]
-    );
+        "id",
+    ]));
+    assert!(r.has("--allow", "./some-dir"));
+    assert!(r.has("--read", "../other"));
+    assert!(r.agent.ends_with(&["--resume".into(), "id".into()]));
 }
 
-/// `npi` / `npi-personal`
 #[test]
-fn replaces_npi_and_reports_unknown_profiles() {
-    let env = nclaude_env();
-    let out = lines(&env.stdout(&["-A", "pi"])).join("\n");
-    assert!(out.starts_with("run\n--profile\nnpi\n"), "{out}");
-    assert!(out.contains("--\npi\n"), "{out}");
+fn cb_profiles_override_agent_settings() {
+    let env = Env::new();
+    env.write(
+        "config/clankerbox/config.toml",
+        r#"
+approve_detected = true
+[agents.pi]
+sandbox.nono.profile = "pi-base"
+[profiles.work]
+sandbox.env = { CB_TEST_ENV = "work" }
+agents.pi.sandbox.nono.profile = "pi-work"
+"#,
+    );
+    let r = run(&env.stdout(&["-A", "pi"]));
+    assert_eq!(r.base_profile(), "pi-base");
+    assert_eq!(r.agent, ["pi"]);
 
-    let out = lines(&env.stdout(&["-A", "pi", "-p", "personal"])).join("\n");
-    assert!(out.starts_with("run\n--profile\nnpi-personal\n"), "{out}");
-    assert!(out.contains("CLAUDE_CONFIG_DIR="), "{out}");
+    let r = run(&env.stdout(&["-A", "pi", "-p", "work"]));
+    assert_eq!(r.base_profile(), "pi-work");
+    assert_eq!(r.tail[0], "env=work");
 
-    let out = lines(&env.stdout(&["-p", "personal", "--nono-profile", "other"])).join("\n");
-    assert!(out.starts_with("wrap\n--profile\nother\n"), "{out}");
+    let r = run(&env.stdout(&["-A", "pi", "-p", "work", "--nono-profile", "other"]));
+    assert_eq!(r.base_profile(), "other");
 
     env.cmd(&["-p", "nope"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "unknown profile `nope` (known: personal)",
+            "unknown profile `nope` (known: work)",
         ));
 }
 
@@ -495,12 +460,11 @@ fn missing_nono_is_a_clear_error() {
 #[test]
 fn claude_uses_builtin_profile_without_pull() {
     let env = Env::new();
-    let out = env.stdout(&["-y"]);
-    let profile = lines(&out)[2].clone();
-    let all: Vec<_> = out.lines().collect();
-    let plugin = all[all.iter().position(|l| *l == "--plugin-dir").unwrap() + 1];
+    let r = run(&env.stdout(&["-y"]));
+    let profile = r.value("--profile");
+    let plugin = &r.agent[r.agent.iter().position(|a| a == "--plugin-dir").unwrap() + 1];
     assert!(Path::new(plugin).join("hooks/hooks.json").is_file());
-    assert!(out.contains(&format!("--read\n{plugin}\n")));
+    assert!(r.has("--read", plugin));
     assert!(env.stdout(&["show"]).contains("explains sandbox denials"));
     let json: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(profile).unwrap()).unwrap();
@@ -552,25 +516,18 @@ fn missing_nono_profile_suggests_pull() {
 
 #[test]
 fn dry_run_prints_command_without_running() {
-    let env = nclaude_env();
-    let repo = env.path("home/repo");
+    let env = Env::new();
     env.write(
         "home/repo/.clankerbox.toml",
-        "[sandbox.nono]\nexplain_denials = false",
+        "[sandbox]\nenv = { CB_TEST_ENV = \"a b\" }",
     );
     let out = env.stdout(&["--dry-run", "--read", "../x y", "--", "--resume", "id"]);
-    let out: Vec<_> = out
-        .split(' ')
-        .map(|w| base_profile(w).unwrap_or_else(|| w.to_owned()))
-        .collect();
-    assert_eq!(
-        out.join(" "),
-        format!(
-            "HERDR_AGENT=claude nono wrap --profile nclaude --allow-cwd --read /proc --allow {} \
-             --read '../x y' -- claude --resume id\n",
-            repo.display()
-        )
+    assert!(
+        out.starts_with("CB_TEST_ENV='a b' nono run --profile "),
+        "{out}"
     );
+    assert!(out.contains(" --read '../x y' -- claude "), "{out}");
+    assert!(out.ends_with(" --resume id\n"), "{out}");
 
     let other = env.path("home/frontend");
     let out = env.stdout(&["--dry-run", "-C", other.to_str().unwrap()]);
