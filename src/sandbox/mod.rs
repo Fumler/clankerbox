@@ -58,6 +58,14 @@ pub trait Sandbox {
     }
 
     fn build(&self, request: &Request<'_>) -> Result<Launch>;
+
+    /// Access the backend allows on top of `Policy` grants, as lines for the user.
+    fn base_access(&self) -> Vec<String>;
+
+    /// Every rule `launch` would apply, as the backend reports them; empty if unsupported.
+    fn full_access(&self, _launch: &Launch) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
 }
 
 pub fn backend(resolved: &Resolved, dirs: &Dirs) -> Box<dyn Sandbox> {

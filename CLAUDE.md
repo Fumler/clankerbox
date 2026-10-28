@@ -29,5 +29,7 @@ shell via direnv for humans; tool shells don't load it, so keep using `nix devel
   out of `config/` and `policy.rs`.
 - Grants are security-relevant: add a test for any change to discovery, trust, merge precedence
   or the built-in grants.
+- Every trust prompt is built by `review_text` in `src/commands/run.rs`. Put anything users should
+  see before approving in its shared tail (not one prompt kind), and show it in `cb show` too.
 - Integration tests in `tests/cli.rs` run `cb` against a stub `nono` on `PATH`; real nono can't
   run inside a nono sandbox.

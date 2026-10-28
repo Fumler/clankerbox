@@ -14,10 +14,11 @@ use clap_complete::Shell;
 ///
 ///   cb [OPTIONS | SANDBOX_ARGS]... [-- AGENT_ARGS...]
 ///
-/// OPTIONS (-A, -p, --nono-profile, -C, --no-project, --unsandboxed, --dry-run) are recognised anywhere
-/// before a lone `--`; every other argument there is passed to the sandbox backend (e.g.
-/// `--allow ./dir` for nono). `--nono-<flag>` passes `--<flag>` to nono, for flags cb uses itself
-/// (e.g. `--nono-dry-run`). Everything after `--` is passed to the agent.
+/// OPTIONS (-A, -p, --nono-profile, -C, --no-project, --unsandboxed, --dry-run, -y,
+/// --detect-subdirs) are recognised anywhere before a lone `--`; every other argument there is
+/// passed to the sandbox backend (e.g. `--allow ./dir` for nono). `--nono-<flag>` passes
+/// `--<flag>` to nono, for flags cb uses itself (e.g. `--nono-dry-run`). Everything after `--`
+/// is passed to the agent.
 #[derive(Debug, Parser)]
 #[command(name = "cb", version, verbatim_doc_comment, styles = crate::style::HELP)]
 pub struct Cli {
@@ -28,6 +29,7 @@ pub struct Cli {
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Args)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct GlobalOpts {
     /// Agent to use instead of the configured default.
     #[arg(short = 'A', long, global = true, value_name = "NAME")]
@@ -50,6 +52,12 @@ pub struct GlobalOpts {
     /// Print the command that would run instead of running it.
     #[arg(long)]
     pub dry_run: bool,
+    /// Run with detected grants without asking.
+    #[arg(short = 'y', long)]
+    pub yes: bool,
+    /// Search subdirectories for toolchains even outside a git or jj repository.
+    #[arg(long, global = true)]
+    pub detect_subdirs: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -186,6 +194,8 @@ pub fn split_run_args(args: impl IntoIterator<Item = OsString>) -> Result<RunArg
             "--no-project" => g.no_project = true,
             "--unsandboxed" => g.unsandboxed = true,
             "--dry-run" => g.dry_run = true,
+            "-y" | "--yes" => g.yes = true,
+            "--detect-subdirs" => g.detect_subdirs = true,
             _ => match text.strip_prefix("--nono-") {
                 Some(rest) => run.sandbox.push(format!("--{rest}").into()),
                 None => run.sandbox.push(arg),
@@ -222,6 +232,8 @@ mod tests {
             "-p",
             "personal",
             "--no-project",
+            "-y",
+            "--detect-subdirs",
             "--allow",
             "./d",
             "--profile=two",
@@ -236,6 +248,8 @@ mod tests {
         assert_eq!(g.profiles, ["personal", "two"]);
         assert_eq!(g.nono_profile.as_deref(), Some("mine"));
         assert!(g.no_project);
+        assert!(g.yes);
+        assert!(g.detect_subdirs);
         assert_eq!(run.sandbox, os(&["--read", "x", "--allow", "./d"]));
         assert_eq!(run.agent_args, os(&["--model", "--", "-p"]));
     }

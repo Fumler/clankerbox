@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow};
 use sha2::{Digest, Sha256};
 
+use super::detect::{Toolchain, detect_toolchains, project_template, scan_subdirs};
 use super::model::ConfigFile;
 use crate::context::{Dirs, GitInfo};
 
@@ -17,6 +18,7 @@ const PRESETS: &str = include_str!("../presets.toml");
 pub enum Origin {
     Preset,
     Global,
+    Detected,
     Project,
     Local,
 }
@@ -24,7 +26,7 @@ pub enum Origin {
 #[derive(Debug)]
 pub struct Layer {
     pub origin: Origin,
-    /// `None` for the built-in presets.
+    /// `None` for the built-in presets and detected config.
     pub path: Option<PathBuf>,
     /// Directory relative paths in this layer resolve against.
     pub dir: PathBuf,
@@ -36,15 +38,19 @@ pub struct Layer {
 
 impl Layer {
     pub fn needs_trust(&self) -> bool {
-        matches!(self.origin, Origin::Project | Origin::Local)
+        matches!(
+            self.origin,
+            Origin::Detected | Origin::Project | Origin::Local
+        )
     }
 }
 
 impl fmt::Display for Layer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.path {
-            Some(path) => write!(f, "{}", path.display()),
-            None => f.write_str("<built-in presets>"),
+        match (&self.path, self.origin) {
+            (Some(path), _) => write!(f, "{}", path.display()),
+            (None, Origin::Detected) => write!(f, "<detected config for {}>", self.dir.display()),
+            (None, _) => f.write_str("<built-in presets>"),
         }
     }
 }
@@ -56,11 +62,42 @@ pub struct Discovered {
     pub cwd: PathBuf,
     pub project_root: PathBuf,
     pub git: Option<GitInfo>,
+    /// Set by [`Discovered::detect`] when there are no project files.
+    pub detected: Option<Vec<&'static Toolchain>>,
 }
 
 impl Discovered {
     pub fn project_layers(&self) -> impl Iterator<Item = &Layer> {
         self.layers.iter().filter(|l| l.needs_trust())
+    }
+
+    pub fn approve_detected(&self) -> bool {
+        self.layers
+            .iter()
+            .any(|l| l.origin == Origin::Global && l.file.approve_detected == Some(true))
+    }
+
+    /// `subdirs` searches subdirectories even outside a repository.
+    pub fn detect(&mut self, dirs: &Dirs, subdirs: bool) -> Result<()> {
+        if self.project_layers().next().is_some() {
+            return Ok(());
+        }
+        let subdirs = subdirs || scan_subdirs(&self.project_root, &dirs.home);
+        let toolchains = detect_toolchains(&self.project_root, subdirs);
+        let content = project_template(&toolchains);
+        let file = parse(&content, Path::new("<detected config>"))?;
+        // Without comments, so template rewording keeps approvals.
+        let hash = hash(toml::to_string(&file)?.as_bytes());
+        self.layers.push(Layer {
+            origin: Origin::Detected,
+            path: None,
+            dir: self.project_root.clone(),
+            file,
+            hash,
+            content,
+        });
+        self.detected = Some(toolchains);
+        Ok(())
     }
 }
 
@@ -123,6 +160,7 @@ pub fn discover(cwd: &Path, dirs: &Dirs, no_project: bool) -> Result<Discovered>
         cwd,
         project_root,
         git,
+        detected: None,
     })
 }
 
@@ -246,6 +284,39 @@ mod tests {
         let d = discover(&pkg, &dirs(&home), false).unwrap();
         assert_eq!(d.project_layers().count(), 1);
         assert_eq!(d.project_root, pkg);
+    }
+
+    #[test]
+    fn detects_config_only_without_project_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().canonicalize().unwrap();
+        let repo = home.join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        fs::create_dir_all(repo.join("crates/a")).unwrap();
+        fs::write(repo.join("crates/a/Cargo.toml"), "").unwrap();
+
+        let mut d = discover(&repo, &dirs(&home), false).unwrap();
+        assert_eq!(d.project_layers().count(), 0);
+        d.detect(&dirs(&home), false).unwrap();
+        let detected: Vec<_> = d.project_layers().collect();
+        assert_eq!(detected.len(), 1);
+        assert_eq!(detected[0].origin, Origin::Detected);
+        assert_eq!(detected[0].dir, repo);
+        assert_eq!(detected[0].file.sandbox.nono.groups, ["rust_runtime"]);
+        let layer = detected[0];
+        assert_ne!(layer.hash, hash(layer.content.as_bytes()));
+        assert_eq!(
+            layer.hash,
+            hash(toml::to_string(&layer.file).unwrap().as_bytes())
+        );
+        let names: Vec<_> = d.detected.unwrap().iter().map(|t| t.name).collect();
+        assert_eq!(names, ["rust"]);
+
+        fs::write(repo.join(LOCAL_FILE), "").unwrap();
+        let mut d = discover(&repo, &dirs(&home), false).unwrap();
+        d.detect(&dirs(&home), false).unwrap();
+        assert!(d.project_layers().all(|l| l.origin == Origin::Local));
+        assert!(d.detected.is_none());
     }
 
     #[test]

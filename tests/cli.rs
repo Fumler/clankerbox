@@ -9,6 +9,10 @@ use tempfile::TempDir;
 /// Prints args, selected env vars and cwd, one per line. `profile show` fails for profiles in
 /// `CB_STUB_MISSING`.
 const STUB: &str = r#"#!/bin/sh
+if [ "$2 $3 $4" = "--dry-run -v --log-file" ]; then
+  printf '  Capabilities:\n  ──\n   r+w  /stub (dir) [profile]\n  ──\n  $ claude\n' >&2
+  exit 0
+fi
 if [ "$1 $2" = "profile show" ]; then
   case " $CB_STUB_MISSING " in *" $3 "*) exit 1 ;; esac
   exit 0
@@ -161,7 +165,7 @@ fn agent_flag_and_global_config() {
     let env = Env::new();
     env.write(
         "config/clankerbox/config.toml",
-        "[agents.mine]\ninherits = \"claude\"\nargs = [\"--mine\"]\nsandbox.nono.profile = \"p\"",
+        "approve_detected = true\n[agents.mine]\ninherits = \"claude\"\nargs = [\"--mine\"]\nsandbox.nono.profile = \"p\"",
     );
     let out = env.stdout(&["-A", "mine"]);
     assert!(out.contains("--profile\np\n"), "{out}");
@@ -171,7 +175,7 @@ fn agent_flag_and_global_config() {
 #[test]
 fn unsandboxed_runs_agent_directly() {
     let env = Env::new();
-    env.cmd(&["--unsandboxed", "--", "hi"])
+    env.cmd(&["-y", "--unsandboxed", "--", "hi"])
         .assert()
         .success()
         .stdout(format!(
@@ -179,7 +183,7 @@ fn unsandboxed_runs_agent_directly() {
             env.path("home/repo").display()
         ))
         .stderr(predicate::str::contains("WITHOUT a sandbox"));
-    env.cmd(&["--unsandboxed", "--read", "x"])
+    env.cmd(&["-y", "--unsandboxed", "--read", "x"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("sandbox is disabled"));
@@ -239,6 +243,8 @@ fn unknown_subcommand_and_schema() {
 
 /// Config replacing `nclaude`-style shell wrappers around `nono wrap`.
 const NCLAUDE_CONFIG: &str = r#"
+approve_detected = true
+
 [agents.claude]
 sandbox.nono.profile = "nclaude"
 sandbox.nono.mode = "direct"
@@ -382,7 +388,7 @@ fn dir_option_sets_working_directory() {
     let env = Env::new();
     let repo = env.path("home/repo");
     let out = env
-        .cmd(&["-C", repo.to_str().unwrap()])
+        .cmd(&["-y", "-C", repo.to_str().unwrap()])
         .current_dir(env.path("home"))
         .assert()
         .success()
@@ -429,7 +435,9 @@ fn init_lists_cache_write_grants() {
         .assert()
         .success()
         .stdout(predicate::str::contains("detected rust"))
-        .stderr(predicate::str::contains("rust  rw  ~/.cargo/registry"));
+        .stderr(predicate::str::contains(
+            "rust  rw  ~/.cargo/registry  (missing, not granted)",
+        ));
 }
 
 #[test]
@@ -490,6 +498,98 @@ fn nono_dry_run_passes_through() {
     let env = Env::new();
     let out = env.stdout(&["--dry-run", "--nono-dry-run"]);
     assert!(out.contains(" --dry-run -- claude"), "{out}");
-    let out = env.stdout(&["--nono-dry-run"]);
+    let out = env.stdout(&["-y", "--nono-dry-run"]);
     assert!(out.contains("--dry-run\n--\nclaude\n"), "{out}");
+}
+
+#[test]
+fn detected_grants_need_approval_without_config() {
+    let env = Env::new();
+    fs::create_dir_all(env.path("home/.cargo/registry")).unwrap();
+    env.write("home/repo/crates/a/Cargo.toml", "");
+    env.cmd(&[]).assert().failure().stderr(
+        predicate::str::contains("no .clankerbox.toml").and(predicate::str::contains("-y")),
+    );
+    let show = env.stdout(&["show"]);
+    assert!(show.contains("untrusted: <detected config for"), "{show}");
+    assert!(show.contains("← detected toolchains"), "{show}");
+    assert!(show.contains("sandbox rules"), "{show}");
+    assert!(show.contains("  r+w  /stub (dir) [profile]"), "{show}");
+
+    env.stdout(&["-y"]);
+    env.stdout(&["--no-project"]);
+    env.cmd(&["trust"]).assert().success();
+    let out = env.stdout(&[]);
+    let registry = env.path("home/.cargo/registry");
+    assert!(
+        out.contains(&format!("--allow\n{}\n", registry.display())),
+        "{out}"
+    );
+
+    env.write("home/repo/flake.nix", "");
+    env.cmd(&[]).assert().failure();
+    env.cmd(&["doctor"]).assert().success();
+    env.write("config/clankerbox/config.toml", "approve_detected = true");
+    env.stdout(&[]);
+    let show = env.stdout(&["show"]);
+    assert!(!show.contains("untrusted"), "{show}");
+}
+
+#[test]
+fn approve_detected_in_project_file_is_ignored_with_warning() {
+    let env = Env::new();
+    env.write("home/repo/.clankerbox.toml", "approve_detected = true");
+    env.cmd(&["trust"]).assert().success();
+    let show = env.stdout(&["show"]);
+    assert!(show.contains("ignoring `approve_detected`"), "{show}");
+}
+
+#[test]
+fn init_in_home_ignores_projects_below_it() {
+    let env = Env::new();
+    env.write("home/repo/Cargo.toml", "");
+    env.cmd(&["init"])
+        .current_dir(env.path("home"))
+        .assert()
+        .success();
+    let config = fs::read_to_string(env.path("home/.clankerbox.toml")).unwrap();
+    assert!(!config.contains("rust_runtime"), "{config}");
+}
+
+#[test]
+fn subdirs_are_searched_only_in_repositories() {
+    let env = Env::new();
+    fs::create_dir_all(env.path("home/.m2/repository")).unwrap();
+    for project in ["plain", "jj"] {
+        env.write(&format!("home/{project}/api/pom.xml"), "");
+    }
+    fs::create_dir_all(env.path("home/jj/.jj")).unwrap();
+    let show = |dir: &str, args: &[&str]| {
+        let out = env
+            .cmd(&[&["show"], args].concat())
+            .current_dir(env.path(dir))
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        String::from_utf8(out).unwrap()
+    };
+    let m2 = "repository  ← detected toolchains";
+    assert!(!show("home/plain", &[]).contains(m2));
+    assert!(show("home/plain", &["--detect-subdirs"]).contains(m2));
+    assert!(show("home/jj", &[]).contains(m2));
+}
+
+#[test]
+fn auto_approved_cache_grants_are_warned_about() {
+    let env = Env::new();
+    fs::create_dir_all(env.path("home/.cargo/registry")).unwrap();
+    env.write("home/repo/Cargo.toml", "");
+    env.cmd(&["-y"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "write access to shared caches: ~/.cargo/registry",
+        ));
 }

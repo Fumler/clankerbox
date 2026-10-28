@@ -135,6 +135,55 @@ impl Sandbox for Nono {
             cwd: request.cwd.to_path_buf(),
         })
     }
+
+    fn base_access(&self) -> Vec<String> {
+        let base = self.options.profile.as_deref().unwrap_or(DEFAULT_PROFILE);
+        let profiles: Vec<_> = std::iter::once(base)
+            .chain(self.options.extends.iter().map(String::as_str))
+            .collect();
+        let groups = if self.options.groups.is_empty() {
+            String::new()
+        } else {
+            format!(" (groups: {})", self.options.groups.join(", "))
+        };
+        vec![
+            format!(
+                "plus everything nono profile {} allows{groups}",
+                profiles.join(", ")
+            ),
+            "nono lists every rule when it starts; `cb show` lists them now".to_owned(),
+        ]
+    }
+
+    fn full_access(&self, launch: &Launch) -> Result<Vec<String>> {
+        let mut args = launch.args.clone();
+        // After the subcommand; `-v` lists group paths, the log file hides `-v` logs.
+        let dry_run = ["--dry-run", "-v", "--log-file", "/dev/null"].map(OsString::from);
+        args.splice(1..1, dry_run);
+        let out = Command::new(&launch.program)
+            .args(&args)
+            .envs(&launch.env)
+            .current_dir(&launch.cwd)
+            .stdin(Stdio::null())
+            .output()
+            .context("cannot run nono")?;
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if !out.status.success() {
+            bail!("`nono --dry-run` failed: {}", stderr.trim());
+        }
+        let separator = |line: &&str| line.trim_start().starts_with('─');
+        let rules: Vec<_> = stderr
+            .lines()
+            .skip_while(|l| !separator(l))
+            .skip(1)
+            .take_while(|l| !separator(l))
+            .map(|l| l.strip_prefix("  ").unwrap_or(l).trim_end().to_owned())
+            .collect();
+        if rules.is_empty() {
+            bail!("no rules in `nono --dry-run` output");
+        }
+        Ok(rules)
+    }
 }
 
 #[cfg(test)]
@@ -187,6 +236,26 @@ mod tests {
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect()
+    }
+
+    #[test]
+    fn base_access_names_profiles_and_groups() {
+        let nono = Nono {
+            options: NonoConfig {
+                profile: Some("claude-code".into()),
+                extends: vec!["extra".into()],
+                groups: vec!["rust_runtime".into()],
+                ..NonoConfig::default()
+            },
+            runtime_dir: PathBuf::new(),
+        };
+        assert_eq!(
+            nono.base_access(),
+            [
+                "plus everything nono profile claude-code, extra allows (groups: rust_runtime)",
+                "nono lists every rule when it starts; `cb show` lists them now",
+            ]
+        );
     }
 
     #[test]

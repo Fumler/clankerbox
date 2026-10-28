@@ -7,7 +7,7 @@ use crate::config::{agent_names, profile_names};
 use crate::style::{DIM, ERROR, LABEL, OK};
 
 pub fn agents(opts: &GlobalOpts) -> Result<()> {
-    let session = Session::open(opts)?;
+    let session = Session::open_undetected(opts)?;
     let default = session.resolve().ok().map(|r| r.agent.name);
     for name in agent_names(&session.discovered, session.platform) {
         let is_default = default.as_ref() == Some(&name);

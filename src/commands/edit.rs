@@ -7,11 +7,10 @@ use anyhow::{Context, Result, bail};
 use super::Session;
 use crate::cli::GlobalOpts;
 use crate::config::discover::{Origin, load_file};
-use crate::config::trust::TrustStore;
 use crate::style::OK;
 
 pub fn edit(opts: &GlobalOpts, local: bool) -> Result<()> {
-    let session = Session::open(opts)?;
+    let session = Session::open_undetected(opts)?;
     let origin = if local {
         Origin::Local
     } else {
@@ -45,7 +44,7 @@ pub fn edit(opts: &GlobalOpts, local: bool) -> Result<()> {
     }
 
     let layer = load_file(&path, origin)?.context("file was removed")?;
-    let mut store = TrustStore::load(&session.dirs.state)?;
+    let mut store = session.trust_store()?;
     store.trust(&layer);
     store.save()?;
     println!("{OK}trusted{OK:#} {}", path.display());

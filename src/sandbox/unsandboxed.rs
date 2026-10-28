@@ -18,4 +18,8 @@ impl Sandbox for Unsandboxed {
             files: Vec::new(),
         })
     }
+
+    fn base_access(&self) -> Vec<String> {
+        vec!["no sandbox: everything you can access".to_owned()]
+    }
 }

@@ -1,3 +1,4 @@
+pub mod detect;
 pub mod discover;
 pub mod model;
 pub mod trust;
@@ -116,6 +117,14 @@ pub fn resolve(
         warnings: Vec::new(),
     };
     builder.builtin_grants(d);
+    for layer in &d.layers {
+        let nested = nested_sets_approve_detected(&layer.file);
+        if nested || (layer.origin != Origin::Global && layer.file.approve_detected.is_some()) {
+            builder.warnings.push(format!(
+                "{layer}: ignoring `approve_detected`; it only works at the top level of the global config"
+            ));
+        }
+    }
 
     // Precedence, lowest first: general settings, then each agent from the most basic in the
     // inheritance chain to the selected one, then the same again for profiles. Within each step,
@@ -152,6 +161,16 @@ pub fn resolve(
         nono: builder.nono,
         warnings: builder.warnings,
     })
+}
+
+fn nested_sets_approve_detected(file: &ConfigFile) -> bool {
+    let w = &file.when;
+    [&w.linux, &w.macos, &w.wsl]
+        .into_iter()
+        .flatten()
+        .map(|f| &**f)
+        .chain(file.profiles.values())
+        .any(|f| f.approve_detected.is_some() || nested_sets_approve_detected(f))
 }
 
 /// The `inherits` chain for `name`, most basic agent first.
@@ -197,6 +216,7 @@ fn user_vars(
     let mut user = BTreeMap::new();
     for origin in [
         Origin::Preset,
+        Origin::Detected,
         Origin::Project,
         Origin::Global,
         Origin::Local,
@@ -218,9 +238,10 @@ fn user_vars(
 }
 
 fn source_of(layer: &Layer) -> Source {
-    match &layer.path {
-        Some(path) => Source::File(path.clone()),
-        None => Source::Preset,
+    match (&layer.path, layer.origin) {
+        (Some(path), _) => Source::File(path.clone()),
+        (None, Origin::Detected) => Source::Detected,
+        (None, _) => Source::Preset,
     }
 }
 
@@ -346,6 +367,10 @@ impl Builder {
     }
 
     fn warn(&mut self, source: &Source, entry: &str, reason: &str) {
+        // Caches the user's toolchain hasn't created yet.
+        if *source == Source::Detected {
+            return;
+        }
         self.warnings
             .push(format!("{source}: skipping `{entry}`: {reason}"));
     }
@@ -410,7 +435,8 @@ mod tests {
             agent: Option<&str>,
             profiles: &[&str],
         ) -> Result<Resolved> {
-            let d = discover(&self.home.join(cwd), &self.dirs, false)?;
+            let mut d = discover(&self.home.join(cwd), &self.dirs, false)?;
+            d.detect(&self.dirs, false)?;
             let profiles: Vec<String> = profiles
                 .iter()
                 .map(std::string::ToString::to_string)
@@ -442,6 +468,45 @@ mod tests {
         assert_eq!(r.backend, BackendKind::Nono);
         assert_eq!(r.nono.profile.as_deref(), Some("claude-code"));
         assert_eq!(grants(&r), [("repo".into(), Access::ReadWrite)]);
+    }
+
+    #[test]
+    fn detected_monorepo_toolchains_grant_caches() {
+        let f = Fixture::new("");
+        fs::create_dir_all(f.home.join("repo/.git")).unwrap();
+        fs::create_dir_all(f.home.join(".m2/repository")).unwrap();
+        f.write("repo/services/api/pom.xml", "");
+        let r = f.resolve("repo", None).unwrap();
+        assert!(r.nono.groups.contains(&"java_runtime".to_owned()));
+        let cache = r
+            .policy
+            .grants
+            .iter()
+            .find(|g| g.path == f.home.join(".m2/repository"))
+            .unwrap();
+        assert_eq!(cache.access, Access::ReadWrite);
+        assert_eq!(cache.source, Source::Detected);
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    }
+
+    #[test]
+    fn approve_detected_is_ignored_outside_global_top_level() {
+        let f = Fixture::new("[profiles.p]\napprove_detected = true");
+        fs::create_dir_all(f.home.join("repo/.git")).unwrap();
+        f.write("repo/.clankerbox.toml", "approve_detected = true");
+        let d = discover(&f.home.join("repo"), &f.dirs, false).unwrap();
+        assert!(!d.approve_detected());
+        let r = f.resolve("repo", None).unwrap();
+        let ignored: Vec<_> = r
+            .warnings
+            .iter()
+            .filter(|w| w.contains("ignoring `approve_detected`"))
+            .collect();
+        assert_eq!(ignored.len(), 2, "{:?}", r.warnings);
+
+        let f = Fixture::new("approve_detected = true");
+        let d = discover(&f.home, &f.dirs, false).unwrap();
+        assert!(d.approve_detected());
     }
 
     #[test]

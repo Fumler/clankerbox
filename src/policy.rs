@@ -30,6 +30,7 @@ impl fmt::Display for Access {
 pub enum Source {
     Builtin(&'static str),
     Preset,
+    Detected,
     File(PathBuf),
 }
 
@@ -38,6 +39,7 @@ impl fmt::Display for Source {
         match self {
             Source::Builtin(what) => write!(f, "built-in: {what}"),
             Source::Preset => f.write_str("built-in presets"),
+            Source::Detected => f.write_str("detected toolchains"),
             Source::File(path) => write!(f, "{}", path.display()),
         }
     }

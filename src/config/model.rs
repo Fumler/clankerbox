@@ -11,6 +11,9 @@ pub struct ConfigFile {
     /// root. Only meaningful in project files.
     pub root: Option<bool>,
 
+    /// Don't ask to approve detected grants. Global config only.
+    pub approve_detected: Option<bool>,
+
     /// Agent to run when none is given with `-A/--agent`.
     pub agent: Option<String>,
 

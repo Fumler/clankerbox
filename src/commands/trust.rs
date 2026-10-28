@@ -26,7 +26,7 @@ fn update(
     mut change: impl FnMut(&mut TrustStore, &Layer) -> bool,
 ) -> Result<()> {
     let session = Session::open(opts)?;
-    let mut store = TrustStore::load(&session.dirs.state)?;
+    let mut store = session.trust_store()?;
     let layers: Vec<_> = session.discovered.project_layers().collect();
     if layers.is_empty() {
         println!(

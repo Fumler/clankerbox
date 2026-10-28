@@ -5,8 +5,8 @@ use anyhow::Result;
 
 use super::Session;
 use crate::cli::GlobalOpts;
+use crate::config::discover::Origin;
 use crate::config::model::BackendKind;
-use crate::config::trust::TrustStore;
 use crate::context;
 use crate::style::{ERROR, OK};
 
@@ -56,15 +56,17 @@ pub fn doctor(opts: &GlobalOpts) -> Result<ExitCode> {
             return Ok(report.finish());
         }
     };
-    let store = TrustStore::load(&session.dirs.state)?;
+    let store = session.trust_store()?;
     for layer in &session.discovered.layers {
-        let trusted = store.is_trusted(layer);
-        let note = if trusted {
-            ""
+        if store.is_trusted(layer) {
+            report.ok(format!("config {layer}"));
+        } else if layer.origin == Origin::Detected {
+            report.ok(format!(
+                "config {layer} (not approved yet: the first run asks; without a terminal pass -y)"
+            ));
         } else {
-            " (untrusted: run `cb trust`)"
-        };
-        report.check(trusted, format!("config {layer}{note}"));
+            report.fail(format!("config {layer} (untrusted: run `cb trust`)"));
+        }
     }
 
     let resolved = match session.resolve() {

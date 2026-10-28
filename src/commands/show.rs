@@ -4,13 +4,12 @@ use anstream::println;
 use anyhow::Result;
 use serde::Serialize;
 
-use super::Session;
+use super::{Session, grant_lines, network_label, warn};
 use crate::cli::RunArgs;
 use crate::config::model::{BackendKind, NonoConfig};
-use crate::config::trust::TrustStore;
 use crate::policy::Policy;
-use crate::sandbox::GeneratedFile;
-use crate::style::{self, DIM, ERROR, LABEL, OK, WARN};
+use crate::sandbox::{self, GeneratedFile};
+use crate::style::{DIM, ERROR, LABEL, OK, WARN};
 
 #[derive(Serialize)]
 struct Report<'a> {
@@ -19,6 +18,8 @@ struct Report<'a> {
     agent: AgentReport<'a>,
     backend: BackendKind,
     policy: &'a Policy,
+    base_access: Vec<String>,
+    full_access: Vec<String>,
     nono: &'a NonoConfig,
     generated_files: &'a [GeneratedFile],
     command: Vec<String>,
@@ -45,7 +46,15 @@ pub fn show(run: &RunArgs, json: bool) -> Result<()> {
     let session = Session::open(opts)?;
     let resolved = session.resolve()?;
     let launch = session.launch(&resolved, &run.sandbox, &run.agent_args)?;
-    let store = TrustStore::load(&session.dirs.state)?;
+    let backend = sandbox::backend(&resolved, &session.dirs);
+    let full_access = launch
+        .write_files()
+        .and_then(|()| backend.full_access(&launch))
+        .unwrap_or_else(|e| {
+            warn(format_args!("cannot list sandbox rules: {e:#}"));
+            Vec::new()
+        });
+    let store = session.trust_store()?;
 
     let report = Report {
         project_root: &session.discovered.project_root,
@@ -66,6 +75,8 @@ pub fn show(run: &RunArgs, json: bool) -> Result<()> {
         },
         backend: resolved.backend,
         policy: &resolved.policy,
+        base_access: backend.base_access(),
+        full_access,
         nono: &resolved.nono,
         generated_files: &launch.files,
         command: std::iter::once(&launch.program)
@@ -107,25 +118,14 @@ pub fn show(run: &RunArgs, json: bool) -> Result<()> {
         format!("{:?}", report.backend).to_lowercase()
     );
     println!("{LABEL}grants{LABEL:#}");
-    let width = resolved
-        .policy
-        .grants
-        .iter()
-        .map(|g| g.path.as_os_str().len())
-        .max()
-        .unwrap_or(0);
-    for g in &resolved.policy.grants {
-        let path = g.path.display().to_string();
-        let access = style::access(g.access);
-        println!(
-            "  {access}{}{access:#} {path:<width$}  {DIM}← {}{DIM:#}",
-            g.access, g.source
-        );
+    let grants: Vec<_> = resolved.policy.grants.iter().collect();
+    for line in grant_lines(&grants) {
+        println!("  {line}");
     }
-    let network = style::network(resolved.policy.network);
+    print_sandbox_rules(&report);
     println!(
-        "{LABEL}network{LABEL:#}       {network}{}{network:#}",
-        format!("{:?}", resolved.policy.network).to_lowercase()
+        "{LABEL}network{LABEL:#}       {}",
+        network_label(resolved.policy.network)
     );
     for (k, v) in report.env {
         println!("{LABEL}env{LABEL:#}           {k}={v}");
@@ -138,4 +138,17 @@ pub fn show(run: &RunArgs, json: bool) -> Result<()> {
         println!("{WARN}warning{WARN:#}       {warning}");
     }
     Ok(())
+}
+
+fn print_sandbox_rules(report: &Report<'_>) {
+    if report.full_access.is_empty() {
+        for line in &report.base_access {
+            println!("  {DIM}{line}{DIM:#}");
+        }
+        return;
+    }
+    println!("{LABEL}sandbox rules{LABEL:#} {DIM}(from the backend; [user] are cb's){DIM:#}");
+    for line in &report.full_access {
+        println!("  {line}");
+    }
 }

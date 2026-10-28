@@ -25,7 +25,7 @@ read, a dependency checked out elsewhere, extra agent flags. Linux and macOS.
 3. Run it. With no config at all, `cb` runs Claude Code sandboxed to the current project:
 
    ```sh
-   cb                              # run claude in the sandbox
+   cb                              # asks once to approve the detected grants, then runs claude
    cb --allow ./scratch            # one-off extra access
    cb show                         # what a run grants (paths it can access), and why
    ```
@@ -58,6 +58,8 @@ Recognised anywhere before a lone `--`:
 | `--no-project` | Ignore project config files |
 | `--unsandboxed` | Run without a sandbox (or set `sandbox.backend = "none"`) |
 | `--dry-run` | Print the command instead of running it |
+| `-y/--yes` | Without a project config, run with the [detected grants](#defaults) without asking |
+| `--detect-subdirs` | Search subdirectories for toolchains outside a git or jj repository too |
 | `--nono-<flag>` | Pass `--<flag>` to nono, for flags cb uses itself, e.g. `--nono-dry-run` |
 
 Other arguments before `--` go to nono verbatim, e.g. `--allow ./dir`. Arguments after `--` go to
@@ -67,7 +69,7 @@ the agent.
 |---|---|
 | `init [--local] [--force]` | Create `.clankerbox.toml`, or a personal `.clankerbox.local.toml` added to `.git/info/exclude` |
 | `trust` / `untrust` | Approve or revoke the project config files that apply here |
-| `show [--json] [ARGS]` | Config files, grants with their source, and the final command |
+| `show [--json] [ARGS]` | Config files, grants with their source, every rule nono will apply, and the final command |
 | `agents` | Available agents (`*` marks the default) and cb profiles |
 | `edit [--local]` | Open the nearest config file in `$EDITOR`, then trust it |
 | `doctor` | Check nono, the agent command, nono profiles and config files |
@@ -76,7 +78,7 @@ the agent.
 
 ## Defaults
 
-With no config, cb grants only:
+Before config files and detected toolchains, cb grants only:
 
 - **Base policy:** the agent's nono profile: `claude-code` for `claude`, `pi` for `pi`, `omp` for
   `omp` (installed with `nono pull`). `codex` and `opencode` get nono's built-in defaults.
@@ -88,10 +90,14 @@ With no config, cb grants only:
 Network and environment variables follow the nono profile (by default: outbound network allowed,
 environment passed through).
 
-`cb init` adds only what detected toolchains need: nono
-[groups](https://nono.sh/docs/cli/features/profiles-groups) (e.g. `rust_runtime` for a
-`Cargo.toml`) and write access to their shared package caches (e.g. `~/.cargo/registry`), which
-it warns about.
+Toolchains are detected from marker files (e.g. `Cargo.toml`, `pom.xml`) in the project root.
+In a git or jj repository, cb also searches up to three directories below it, so monorepos with
+modules in subdirectories are covered; `--detect-subdirs` does this outside a repository too.
+Dependency, build and hidden directories are skipped. For each one cb adds nono
+[groups](https://nono.sh/docs/cli/features/profiles-groups) (e.g. `rust_runtime`) and write
+access to its shared package caches (e.g. `~/.cargo/registry`). `cb init` writes these to
+`.clankerbox.toml`; without any project config file, `cb` applies them directly and shows every
+grant for approval (see [Trust](#trust)).
 
 ## Trust
 
@@ -99,6 +105,12 @@ A repository's config can grant access to anything, so project files must be app
 `direnv allow`. The first run with a new or changed file shows its contents and grants and asks
 `Trust these files and continue? [y/N]`. Without a terminal, cb refuses until you run `cb trust`.
 `init` and `edit` trust what they write; the global config is always trusted.
+
+A project with no config files is reviewed the same way: the first run lists every grant,
+including the detected ones, and asks `Run with these grants?`. The approval is remembered for
+the project root until the detected toolchains change. Skip the question with `-y`, or everywhere
+with `approve_detected = true` at the top of the global config (ignored, with a warning, anywhere
+else).
 
 ## Configuration
 
@@ -176,6 +188,8 @@ files, set with `sandbox.nono.profile`), so one cb profile can adjust every agen
 
 ```toml
 # $XDG_CONFIG_HOME/clankerbox/config.toml
+approve_detected = true                  # don't ask in projects without a config file
+
 [sandbox]
 read = ["~/notes"]                       # extra access in every project
 
