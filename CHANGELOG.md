@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format follows
 [Conventional Commits](https://www.conventionalcommits.org) and versions follow
 [Semantic Versioning](https://semver.org).
 
+## [2.0.0] - 2026-10-28
+
+### Features
+
+- **run:** **BREAKING** Confirm detected grants in projects without a config
+- **nono:** **BREAKING** Ship a built-in Claude Code profile and denial hints
+
+### Documentation
+
+- **claude:** Add a comment rule to CLAUDE.md
+
+### Testing
+
+- **cli:** Drop dotfiles-specific tests and stop asserting full nono argv
+
+### Miscellaneous
+
+- **dev:** Add the project's cb config and ignore local overrides
 ## [1.1.0] - 2026-10-27
 
 ### Features
