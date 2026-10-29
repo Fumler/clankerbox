@@ -23,6 +23,7 @@ shell via direnv for humans; tool shells don't load it, so keep using `nix devel
 - Commit messages follow Conventional Commits (`feat:`, `fix:`, `feat!:` …). The CI - Lint and
   test workflow rejects others, and git-cliff derives the next version and `CHANGELOG.md` from them.
   Preview with `nix develop path:. -c git cliff --unreleased`.
+- End the subject with `[skip ci]` when a commit doesn't change the built `cb` (docs, CLAUDE.md).
 - Update README.md and `docs/` in the same change as user-visible behaviour. README is for
   newcomers (what, install, use, risks); reference detail goes in `docs/`. Keep both terse: no
   filler, one fact per bullet, no repeating a fact across files.
