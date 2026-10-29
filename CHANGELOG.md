@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format follows
 [Conventional Commits](https://www.conventionalcommits.org) and versions follow
 [Semantic Versioning](https://semver.org).
 
+## [2.1.0] - 2026-10-29
+
+### Features
+
+- **herdr:** Report Claude sessions to Herdr and resume them through cb
+
+### Miscellaneous
+
+- **install:** Add install script and installation docs [skip ci]
 ## [2.0.0] - 2026-10-28
 
 ### Features
