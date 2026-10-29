@@ -126,7 +126,7 @@ jobs:
       - name: Package archive
         run: |
           mkdir "$ARCHIVE"
-          cp "target/${{ matrix.target }}/release/cb" LICENSE README.md CHANGELOG.md "$ARCHIVE/"
+          cp -r "target/${{ matrix.target }}/release/cb" LICENSE README.md CHANGELOG.md docs "$ARCHIVE/"
           tar -czf "$ARCHIVE.tar.gz" "$ARCHIVE"
 
       - name: Upload archive
