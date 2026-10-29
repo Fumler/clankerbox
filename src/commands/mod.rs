@@ -7,7 +7,6 @@ pub mod show;
 pub mod trust;
 
 use std::env;
-use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -15,7 +14,7 @@ use std::path::{Path, PathBuf};
 use anstream::{eprint, eprintln};
 use anyhow::{Context, Result};
 
-use crate::cli::GlobalOpts;
+use crate::cli::{GlobalOpts, RunArgs};
 use crate::config::detect::Toolchain;
 use crate::config::discover::{Discovered, discover};
 use crate::config::model::{BackendKind, Platform};
@@ -23,8 +22,9 @@ use crate::config::trust::TrustStore;
 use crate::config::vars::Vars;
 use crate::config::{self, Resolved};
 use crate::context::Dirs;
+use crate::herdr;
 use crate::policy::{Access, Grant, Network};
-use crate::sandbox::{self, Launch, Request};
+use crate::sandbox::{self, Launch, Request, Sandbox};
 use crate::style::{self, DIM, LABEL, WARN};
 
 pub struct Session {
@@ -91,24 +91,22 @@ impl Session {
         Ok(resolved)
     }
 
+    /// Build once per command: it reads the Herdr environment.
+    pub fn backend(&self, resolved: &Resolved) -> Box<dyn Sandbox> {
+        sandbox::backend(resolved, &self.dirs, herdr::detect().as_ref())
+    }
+
     pub fn launch(
         &self,
+        backend: &dyn Sandbox,
         resolved: &Resolved,
-        sandbox_args: &[OsString],
-        agent_args: &[OsString],
+        run: &RunArgs,
     ) -> Result<Launch> {
-        let args = resolved
-            .agent
-            .args
-            .iter()
-            .map(OsString::from)
-            .chain(agent_args.iter().cloned())
-            .collect();
-        sandbox::backend(resolved, &self.dirs).build(&Request {
+        backend.build(&Request {
             policy: &resolved.policy,
-            passthrough: sandbox_args,
+            run,
             program: &resolved.agent.command,
-            args,
+            config_args: &resolved.agent.args,
             cwd: &self.discovered.cwd,
         })
     }

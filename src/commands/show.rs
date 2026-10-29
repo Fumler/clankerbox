@@ -8,7 +8,7 @@ use super::{Session, grant_lines, network_label, warn};
 use crate::cli::RunArgs;
 use crate::config::model::{BackendKind, NonoConfig};
 use crate::policy::Policy;
-use crate::sandbox::{self, GeneratedFile};
+use crate::sandbox::GeneratedFile;
 use crate::style::{DIM, ERROR, LABEL, OK, WARN};
 
 #[derive(Serialize)]
@@ -46,8 +46,8 @@ pub fn show(run: &RunArgs, json: bool) -> Result<()> {
     let opts = &run.global;
     let session = Session::open(opts)?;
     let resolved = session.resolve()?;
-    let launch = session.launch(&resolved, &run.sandbox, &run.agent_args)?;
-    let backend = sandbox::backend(&resolved, &session.dirs);
+    let backend = session.backend(&resolved);
+    let launch = session.launch(&*backend, &resolved, run)?;
     let full_access = launch
         .write_files()
         .and_then(|()| backend.full_access(&launch))

@@ -1,5 +1,5 @@
 {
   "name": "clankerbox",
-  "description": "Explains nono sandbox denials when Claude Code runs under cb (clankerbox).",
+  "description": "Claude Code hooks for sessions run by cb (clankerbox).",
   "homepage": "https://github.com/Fumler/clankerbox"
 }

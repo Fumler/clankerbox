@@ -2,6 +2,7 @@ mod cli;
 mod commands;
 mod config;
 mod context;
+mod herdr;
 mod policy;
 mod sandbox;
 mod style;
@@ -59,6 +60,9 @@ fn run() -> Result<ExitCode> {
                 println!("{output}");
             }
         }
+        Command::Hook {
+            name: cli::HookName::Herdr,
+        } => herdr::hook(),
     }
     Ok(ExitCode::SUCCESS)
 }

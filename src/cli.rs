@@ -106,6 +106,7 @@ pub enum Command {
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
 pub enum HookName {
     ExplainDenial,
+    Herdr,
 }
 
 pub const SUBCOMMANDS: &[&str] = &[
@@ -125,8 +126,30 @@ pub const SUBCOMMANDS: &[&str] = &[
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct RunArgs {
     pub global: GlobalOpts,
+    pub options: Vec<TypedOption>,
+    /// As typed, including `--nono-` prefixes.
     pub sandbox: Vec<OsString>,
     pub agent_args: Vec<OsString>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct TypedOption {
+    pub flag: String,
+    pub typed: Vec<OsString>,
+}
+
+impl RunArgs {
+    pub fn passthrough(&self) -> Vec<OsString> {
+        self.sandbox
+            .iter()
+            .map(
+                |arg| match arg.to_str().and_then(|a| a.strip_prefix("--nono-")) {
+                    Some(rest) => format!("--{rest}").into(),
+                    None => arg.clone(),
+                },
+            )
+            .collect()
+    }
 }
 
 pub enum Invocation {
@@ -184,10 +207,14 @@ pub fn split_run_args(args: impl IntoIterator<Item = OsString>) -> Result<RunArg
                 _ => (&*text, None),
             },
         };
+        let mut separate_value = None;
         let mut value = || {
             inline
                 .clone()
-                .or_else(|| args.next())
+                .or_else(|| {
+                    separate_value = args.next();
+                    separate_value.clone()
+                })
                 .with_context(|| format!("`{flag}` requires a value"))
         };
         let utf8 = |v: OsString| {
@@ -205,11 +232,15 @@ pub fn split_run_args(args: impl IntoIterator<Item = OsString>) -> Result<RunArg
             "--dry-run" => g.dry_run = true,
             "-y" | "--yes" => g.yes = true,
             "--detect-subdirs" => g.detect_subdirs = true,
-            _ => match text.strip_prefix("--nono-") {
-                Some(rest) => run.sandbox.push(format!("--{rest}").into()),
-                None => run.sandbox.push(arg),
-            },
+            _ => {
+                run.sandbox.push(arg);
+                continue;
+            }
         }
+        run.options.push(TypedOption {
+            flag: flag.to_owned(),
+            typed: std::iter::once(arg).chain(separate_value).collect(),
+        });
     }
     Ok(run)
 }
@@ -272,7 +303,7 @@ mod tests {
             "latte",
         ]);
         assert_eq!(
-            run.sandbox,
+            run.passthrough(),
             os(&["--dry-run", "--log-file=x", "--theme", "latte"])
         );
         assert!(!run.global.dry_run);
@@ -289,6 +320,24 @@ mod tests {
         assert_eq!(run.global.profiles, ["work"]);
         assert_eq!(run.sandbox, [] as [std::ffi::OsString; 0]);
         assert_eq!(run.agent_args, os(&["-x"]));
+    }
+
+    #[test]
+    fn own_options_are_kept_as_typed() {
+        let run = split(&["-p", "w", "--read", "x", "-Cdir", "--yes", "--", "-p"]);
+        let options: Vec<_> = run
+            .options
+            .iter()
+            .map(|o| (o.flag.as_str(), o.typed.clone()))
+            .collect();
+        assert_eq!(
+            options,
+            [
+                ("-p", os(&["-p", "w"])),
+                ("-C", os(&["-Cdir"])),
+                ("--yes", os(&["--yes"])),
+            ]
+        );
     }
 
     #[test]

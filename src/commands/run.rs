@@ -16,24 +16,24 @@ use crate::config::Resolved;
 use crate::config::discover::{Layer, Origin, PROJECT_FILE};
 use crate::config::model::BackendKind;
 use crate::policy::{Access, Grant, Source};
-use crate::sandbox;
+use crate::sandbox::Sandbox;
 use crate::style::{DIM, ERROR, LABEL};
 
 pub fn run(args: &RunArgs) -> Result<Infallible> {
     let session = Session::open(&args.global)?;
     let resolved = session.resolve()?;
+    let backend = session.backend(&resolved);
     if args.global.dry_run {
         for warning in &resolved.warnings {
             warn(warning);
         }
-        let launch = session.launch(&resolved, &args.sandbox, &args.agent_args)?;
+        let launch = session.launch(&*backend, &resolved, args)?;
         launch.write_files()?;
         println!("{}", launch.display_shell());
         std::process::exit(0);
     }
-    sandbox::backend(&resolved, &session.dirs)
-        .preflight(&mut |question| interactive().then(|| confirm(question).unwrap_or(false)))?;
-    ensure_trusted(&session, &resolved)?;
+    backend.preflight(&mut |question| interactive().then(|| confirm(question).unwrap_or(false)))?;
+    ensure_trusted(&session, &*backend, &resolved)?;
     for warning in &resolved.warnings {
         warn(warning);
     }
@@ -43,7 +43,7 @@ pub fn run(args: &RunArgs) -> Result<Infallible> {
             resolved.agent.command
         );
     }
-    let launch = session.launch(&resolved, &args.sandbox, &args.agent_args)?;
+    let launch = session.launch(&*backend, &resolved, args)?;
     for grant in resolved.policy.grants.iter().filter(|g| g.pin) {
         if let Err(e) = pin(&grant.path) {
             warn(format_args!(
@@ -51,6 +51,9 @@ pub fn run(args: &RunArgs) -> Result<Infallible> {
                 grant.path.display()
             ));
         }
+    }
+    for warning in backend.prepare() {
+        warn(warning);
     }
     launch.exec()
 }
@@ -63,7 +66,7 @@ fn pin(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn ensure_trusted(session: &Session, resolved: &Resolved) -> Result<()> {
+fn ensure_trusted(session: &Session, backend: &dyn Sandbox, resolved: &Resolved) -> Result<()> {
     let mut store = session.trust_store()?;
     if session
         .discovered
@@ -96,7 +99,7 @@ fn ensure_trusted(session: &Session, resolved: &Resolved) -> Result<()> {
         }
         bail!("untrusted project config:\n{list}\nreview it, then run `cb trust`");
     }
-    eprint!("{}", review_text(session, resolved, &untrusted));
+    eprint!("{}", review_text(session, backend, resolved, &untrusted));
     let question = if detected {
         "Run with these grants?"
     } else {
@@ -115,7 +118,12 @@ fn ensure_trusted(session: &Session, resolved: &Resolved) -> Result<()> {
 }
 
 /// What the trust prompt shows before asking; the same tail for every kind of config.
-fn review_text(session: &Session, resolved: &Resolved, untrusted: &[&Layer]) -> String {
+fn review_text(
+    session: &Session,
+    backend: &dyn Sandbox,
+    resolved: &Resolved,
+    untrusted: &[&Layer],
+) -> String {
     let mut out = String::new();
     let toolchains = session.discovered.detected.as_deref().unwrap_or_default();
     if untrusted.iter().any(|l| l.origin == Origin::Detected) {
@@ -137,7 +145,6 @@ fn review_text(session: &Session, resolved: &Resolved, untrusted: &[&Layer]) -> 
             write_file_review(&mut out, layer, resolved);
         }
     }
-    let backend = sandbox::backend(resolved, &session.dirs);
     for line in backend.base_access().iter().chain(&backend.notes()) {
         let _ = writeln!(out, "  {DIM}{line}{DIM:#}");
     }
@@ -236,7 +243,8 @@ mod tests {
         let session = session(home);
         let resolved = session.resolve().unwrap();
         let untrusted: Vec<_> = session.discovered.project_layers().collect();
-        review_text(&session, &resolved, &untrusted)
+        let backend = session.backend(&resolved);
+        review_text(&session, &*backend, &resolved, &untrusted)
     }
 
     #[test]

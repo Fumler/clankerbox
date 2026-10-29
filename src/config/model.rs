@@ -120,10 +120,14 @@ pub struct NonoConfig {
     /// Policy groups to include on top of the profile (see `nono profile groups`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<String>,
-    /// Load cb's Claude Code plugin, which tells Claude how to diagnose a sandbox denial and
-    /// which cb settings would fix it. Only for agents with `kind = "claude"`, whose command must
-    /// take Claude Code's flags (`--plugin-dir`), so not a wrapper like `npx`. Defaults to true.
+    /// Tell Claude how to diagnose a sandbox denial and which cb settings would fix it, through
+    /// hooks in cb's Claude Code plugin. Only for agents with `kind = "claude"`. Defaults to true.
     pub explain_denials: Option<bool>,
+    /// Report Claude Code's state and session to Herdr (<https://herdr.dev>) when cb runs in a
+    /// Herdr pane, so Herdr shows it and resumes it through cb after a restart. Grants connect
+    /// access to the Herdr socket, which can control every Herdr pane. Only for agents with
+    /// `kind = "claude"`. Defaults to true.
+    pub herdr: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]

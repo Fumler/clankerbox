@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::DirBuilder;
 use std::os::unix::fs::DirBuilderExt;
@@ -10,6 +11,7 @@ use super::{Confirm, GeneratedFile, Launch, Request, Sandbox, claude_plugin};
 use crate::config::discover::hash;
 use crate::config::model::{NonoConfig, NonoMode};
 use crate::context;
+use crate::herdr;
 use crate::policy::{Access, Network};
 
 const DEFAULT_PROFILE: &str = "default";
@@ -89,6 +91,8 @@ pub struct Nono {
     pub cb: PathBuf,
     pub home: PathBuf,
     pub runtime_dir: PathBuf,
+    pub herdr: Option<herdr::Host>,
+    pub claude_config: Option<PathBuf>,
 }
 
 /// Registry pack providing a nono profile.
@@ -136,6 +140,43 @@ impl Nono {
     fn explain_denials(&self) -> bool {
         self.agent_kind.as_deref() == Some("claude") && self.options.explain_denials != Some(false)
     }
+
+    fn claude_plugin(
+        &self,
+        request: &Request<'_>,
+        args: &mut Vec<OsString>,
+        files: &mut Vec<GeneratedFile>,
+        env: &mut BTreeMap<String, String>,
+    ) -> Result<Option<PathBuf>> {
+        let herdr = self.herdr();
+        if let Some(host) = herdr {
+            args.extend(["--allow-unix-socket".into(), host.socket.clone().into()]);
+            env.insert(herdr::MARKER_ENV.into(), "1".into());
+            if let Some(argv) = host.resume_argv(request.run, request.cwd) {
+                env.insert(herdr::RESUME_ENV.into(), serde_json::to_string(&argv)?);
+            }
+        }
+        if !self.explain_denials() && herdr.is_none() {
+            return Ok(None);
+        }
+        let (dir, plugin_files) = claude_plugin::generate(
+            &self.runtime_dir,
+            &self.cb,
+            self.explain_denials(),
+            herdr.is_some(),
+        );
+        files.extend(plugin_files);
+        args.extend(["--read".into(), dir.clone().into()]);
+        if self.cb.is_absolute() {
+            args.extend(["--read-file".into(), self.cb.clone().into()]);
+        }
+        Ok(Some(dir))
+    }
+
+    fn herdr(&self) -> Option<&herdr::Host> {
+        let on = self.agent_kind.as_deref() == Some("claude") && self.options.herdr != Some(false);
+        self.herdr.as_ref().filter(|_| on)
+    }
 }
 
 impl Sandbox for Nono {
@@ -173,6 +214,15 @@ impl Sandbox for Nono {
             }
             Some(false) => bail!("nono profile `{profile}` is not installed"),
             None => Err(missing(profile, Some(pack))),
+        }
+    }
+
+    fn prepare(&self) -> Vec<String> {
+        match (self.herdr(), &self.claude_config) {
+            (Some(_), Some(config)) => {
+                herdr::silence_native_hook(std::slice::from_ref(config), &self.home)
+            }
+            _ => Vec::new(),
         }
     }
 
@@ -247,28 +297,22 @@ impl Sandbox for Nono {
                 args.extend([flag.into(), port.to_string().into()]);
             }
         }
-        let plugin = self.explain_denials().then(|| {
-            let (dir, plugin_files) = claude_plugin::generate(&self.runtime_dir, &self.cb);
-            files.extend(plugin_files);
-            args.extend(["--read".into(), dir.clone().into()]);
-            if self.cb.is_absolute() {
-                args.extend(["--read-file".into(), self.cb.clone().into()]);
-            }
-            dir
-        });
+        let mut env = policy.env.clone();
+        let plugin = self.claude_plugin(request, &mut args, &mut files, &mut env)?;
         args.extend(policy.extra_args.iter().map(OsString::from));
-        args.extend(request.passthrough.iter().cloned());
+        args.extend(request.run.passthrough());
         args.push("--".into());
         args.push(request.program.into());
+        args.extend(request.config_args.iter().map(OsString::from));
         if let Some(dir) = plugin {
             args.extend(["--plugin-dir".into(), dir.into()]);
         }
-        args.extend(request.args.iter().cloned());
+        args.extend(request.run.agent_args.iter().cloned());
 
         Ok(Launch {
             program: "nono".into(),
             args,
-            env: policy.env.clone(),
+            env,
             files,
             cwd: request.cwd.to_path_buf(),
         })
@@ -302,14 +346,25 @@ impl Sandbox for Nono {
     }
 
     fn notes(&self) -> Vec<String> {
-        if !self.explain_denials() {
-            return Vec::new();
+        let mut notes = Vec::new();
+        if self.explain_denials() {
+            notes.push(
+                "loads cb's Claude Code plugin, which explains sandbox denials to Claude (read \
+                 access to it and to cb); turn off with `sandbox.nono.explain_denials = false`"
+                    .to_owned(),
+            );
         }
-        vec![
-            "loads cb's Claude Code plugin, which explains sandbox denials to Claude (read access \
-             to it and to cb); turn off with `sandbox.nono.explain_denials = false`"
-                .to_owned(),
-        ]
+        if let Some(herdr::Host { socket, .. }) = self.herdr() {
+            notes.push(format!(
+                "reports Claude's state to Herdr through cb's Claude Code plugin, with access to \
+                 the Herdr socket {}: the agent can control every Herdr pane, including \
+                 unsandboxed shells. Adds a line to Herdr's own Claude hook \
+                 (hooks/herdr-agent-state.sh) so it skips these sessions. Turn off with \
+                 `sandbox.nono.herdr = false`",
+                socket.display()
+            ));
+        }
+        notes
     }
 
     fn full_access(&self, launch: &Launch) -> Result<Vec<String>> {
@@ -366,6 +421,7 @@ mod tests {
     use std::fs;
 
     use super::*;
+    use crate::cli::RunArgs;
     use crate::policy::{Grant, Policy, Source};
 
     fn os(args: &[&str]) -> Vec<OsString> {
@@ -373,10 +429,26 @@ mod tests {
     }
 
     fn build(options: NonoConfig, passthrough: &[&str]) -> Launch {
-        build_for(None, options, passthrough)
+        launch(&nono_for(None, options), passthrough)
     }
 
-    fn build_for(kind: Option<&str>, options: NonoConfig, passthrough: &[&str]) -> Launch {
+    fn build_for(kind: Option<&str>, options: NonoConfig) -> Launch {
+        launch(&nono_for(kind, options), &[])
+    }
+
+    fn nono_for(kind: Option<&str>, options: NonoConfig) -> Nono {
+        Nono {
+            options,
+            agent_kind: kind.map(Into::into),
+            cb: "/bin/cb".into(),
+            home: PathBuf::new(),
+            runtime_dir: "/run/cb".into(),
+            herdr: None,
+            claude_config: None,
+        }
+    }
+
+    fn launch(nono: &Nono, passthrough: &[&str]) -> Launch {
         let mut policy = Policy::default();
         policy.grant(Grant {
             path: "/repo".into(),
@@ -395,18 +467,15 @@ mod tests {
         policy.network = Network::Block;
         policy.open_ports = vec![3000];
         policy.extra_args = vec!["--allow-gpu".into()];
-        let nono = Nono {
-            options,
-            agent_kind: kind.map(Into::into),
-            cb: "/bin/cb".into(),
-            home: PathBuf::new(),
-            runtime_dir: "/run/cb".into(),
-        };
         nono.build(&Request {
             policy: &policy,
-            passthrough: &os(passthrough),
+            run: &RunArgs {
+                sandbox: os(passthrough),
+                agent_args: os(&["-c"]),
+                ..RunArgs::default()
+            },
             program: "claude",
-            args: os(&["--model", "opus"]),
+            config_args: &["--model".into(), "opus".into()],
             cwd: Path::new("/repo"),
         })
         .unwrap()
@@ -422,18 +491,15 @@ mod tests {
 
     #[test]
     fn base_access_names_profiles_and_groups() {
-        let nono = Nono {
-            options: NonoConfig {
+        let nono = nono_for(
+            None,
+            NonoConfig {
                 profile: Some("claude-code".into()),
                 extends: vec!["extra".into()],
                 groups: vec!["rust_runtime".into()],
                 ..NonoConfig::default()
             },
-            agent_kind: None,
-            cb: PathBuf::new(),
-            home: PathBuf::new(),
-            runtime_dir: PathBuf::new(),
-        };
+        );
         assert_eq!(
             nono.base_access(),
             [
@@ -452,6 +518,7 @@ mod tests {
                 extends: vec!["wsl".into()],
                 groups: vec![],
                 explain_denials: None,
+                herdr: None,
             },
             &["--read", "/tmp/x"],
         );
@@ -460,7 +527,7 @@ mod tests {
             args(&launch).join(" "),
             "run --profile claude-code --extends wsl --allow-cwd --allow /repo \
              --read-file /home/me/.gitconfig --block-net --open-port 3000 --allow-gpu \
-             --read /tmp/x -- claude --model opus"
+             --read /tmp/x -- claude --model opus -c"
         );
         assert!(launch.files.is_empty());
 
@@ -531,12 +598,15 @@ mod tests {
 
     #[test]
     fn claude_gets_denial_plugin_read_only_unless_disabled() {
-        let launch = build_for(Some("claude"), NonoConfig::default(), &[]);
+        let launch = build_for(Some("claude"), NonoConfig::default());
         let argv = args(&launch);
         let dir = &argv[argv.iter().position(|a| a == "--plugin-dir").unwrap() + 1];
         assert!(dir.starts_with("/run/cb/claude-plugin/"));
         let program = argv.iter().position(|a| a == "claude").unwrap();
-        assert_eq!(argv[program + 1], "--plugin-dir");
+        assert_eq!(
+            argv[program + 1..],
+            ["--model", "opus", "--plugin-dir", dir, "-c"]
+        );
         let read = argv
             .windows(2)
             .position(|w| w[0] == "--read" && w[1] == *dir);
@@ -564,11 +634,71 @@ mod tests {
             ..NonoConfig::default()
         };
         for launch in [
-            build_for(Some("claude"), off, &[]),
+            build_for(Some("claude"), off),
             build(NonoConfig::default(), &[]),
         ] {
             assert!(!args(&launch).contains(&"--plugin-dir".to_owned()));
             assert!(launch.files.is_empty());
+        }
+    }
+
+    #[test]
+    fn herdr_pane_grants_socket_and_hooks_for_claude_unless_disabled() {
+        let herdr = |kind, options| Nono {
+            herdr: Some(herdr::Host {
+                socket: "/run/herdr.sock".into(),
+                resume_env: Vec::new(),
+            }),
+            ..nono_for(kind, options)
+        };
+        let nono = herdr(Some("claude"), NonoConfig::default());
+        let run = launch(&nono, &[]);
+        let argv = args(&run);
+        assert!(
+            argv.windows(2)
+                .any(|w| w == ["--allow-unix-socket", "/run/herdr.sock"])
+        );
+        assert_eq!(run.env[herdr::RESUME_ENV], r#"["cb","-C","/repo","--"]"#);
+        let hooks = run
+            .files
+            .iter()
+            .find(|f| f.path.ends_with("hooks/hooks.json"))
+            .unwrap();
+        assert!(
+            hooks.contents.contains("hook herdr") && hooks.contents.contains("hook explain-denial")
+        );
+        assert!(nono.notes().iter().any(|n| n.contains("/run/herdr.sock")
+            && n.contains("every Herdr pane")
+            && n.contains("sandbox.nono.herdr = false")));
+
+        let only_herdr = herdr(
+            Some("claude"),
+            NonoConfig {
+                explain_denials: Some(false),
+                ..NonoConfig::default()
+            },
+        );
+        let run = launch(&only_herdr, &[]);
+        assert!(args(&run).contains(&"--plugin-dir".to_owned()));
+        let hooks = run
+            .files
+            .iter()
+            .find(|f| f.path.ends_with("hooks/hooks.json"))
+            .unwrap();
+        assert!(!hooks.contents.contains("explain-denial"));
+
+        let off = NonoConfig {
+            herdr: Some(false),
+            ..NonoConfig::default()
+        };
+        for nono in [
+            herdr(Some("claude"), off),
+            herdr(None, NonoConfig::default()),
+        ] {
+            let run = launch(&nono, &[]);
+            assert!(!args(&run).contains(&"--allow-unix-socket".to_owned()));
+            assert!(run.env.is_empty());
+            assert!(!nono.notes().iter().any(|n| n.contains("Herdr")));
         }
     }
 
@@ -581,13 +711,7 @@ mod tests {
         };
         let launch = build(direct.clone(), &[]);
         assert!(args(&launch).windows(2).any(|w| w == ["--read", "/proc"]));
-        let nono = Nono {
-            options: direct,
-            agent_kind: None,
-            cb: PathBuf::new(),
-            home: PathBuf::new(),
-            runtime_dir: PathBuf::new(),
-        };
+        let nono = nono_for(None, direct);
         assert!(nono.base_access().iter().any(|l| l.contains("/proc")));
 
         let launch = build(NonoConfig::default(), &[]);
@@ -603,23 +727,22 @@ mod tests {
         )
         .unwrap();
         fs::write(tmp.path().join("bad.json"), "[]").unwrap();
-        let nono = |profile: &str, groups: &[&str]| Nono {
-            options: NonoConfig {
-                profile: Some(profile.into()),
-                groups: groups.iter().map(|g| (*g).into()).collect(),
-                ..NonoConfig::default()
-            },
-            agent_kind: None,
-            cb: PathBuf::new(),
-            home: PathBuf::new(),
-            runtime_dir: "/run/cb".into(),
+        let nono = |profile: &str, groups: &[&str]| {
+            nono_for(
+                None,
+                NonoConfig {
+                    profile: Some(profile.into()),
+                    groups: groups.iter().map(|g| (*g).into()).collect(),
+                    ..NonoConfig::default()
+                },
+            )
         };
         let build = |nono: Nono| {
             nono.build(&Request {
                 policy: &Policy::default(),
-                passthrough: &[],
+                run: &RunArgs::default(),
                 program: "claude",
-                args: Vec::new(),
+                config_args: &[],
                 cwd: tmp.path(),
             })
         };

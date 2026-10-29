@@ -25,6 +25,8 @@ pub struct Resolved {
     pub backend: BackendKind,
     pub policy: Policy,
     pub nono: NonoConfig,
+    /// Never one a project file sets: cb follows paths its files name.
+    pub claude_config: Option<PathBuf>,
     pub warnings: Vec<String>,
 }
 
@@ -153,7 +155,7 @@ pub fn resolve(
         }
     }
     let command = command.with_context(|| format!("agent `{name}` has no `command`"))?;
-    builder.kind_grants(kind.as_deref(), d);
+    let claude_config = builder.kind_grants(kind.as_deref(), d);
 
     Ok(Resolved {
         agent: Agent {
@@ -165,6 +167,7 @@ pub fn resolve(
         backend: builder.backend.unwrap_or(BackendKind::Nono),
         policy: builder.policy,
         nono: builder.nono,
+        claude_config,
         warnings: builder.warnings,
     })
 }
@@ -284,9 +287,9 @@ impl Builder {
         }
     }
 
-    fn kind_grants(&mut self, kind: Option<&str>, d: &Discovered) {
+    fn kind_grants(&mut self, kind: Option<&str>, d: &Discovered) -> Option<PathBuf> {
         if kind != Some("claude") {
-            return;
+            return None;
         }
         if let Some(main) = d.git.as_ref().and_then(|g| g.main_worktree())
             && let Ok(path) = main.join(".claude/settings.local.json").canonicalize()
@@ -299,9 +302,9 @@ impl Builder {
                 source: Source::Builtin("claude settings from main worktree"),
             });
         }
-        if let Some(config_dir) = self.claude_config_dir() {
-            self.claude_symlink_targets(&config_dir);
-        }
+        let config_dir = self.claude_config_dir()?;
+        self.claude_symlink_targets(&config_dir);
+        Some(config_dir)
     }
 
     /// Claude's config dir, granted read-write with its lock file when `CLAUDE_CONFIG_DIR` sets
@@ -457,6 +460,9 @@ impl Builder {
         }
         if nono.explain_denials.is_some() {
             self.nono.explain_denials = nono.explain_denials;
+        }
+        if nono.herdr.is_some() {
+            self.nono.herdr = nono.herdr;
         }
         extend_unique(&mut self.nono.extends, &nono.extends);
         extend_unique(&mut self.nono.groups, &nono.groups);
@@ -760,6 +766,24 @@ mod tests {
         );
         assert_eq!(
             f.resolve("repo", Some("pi")).unwrap().nono.explain_denials,
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn herdr_is_overridden_by_later_layers_only_when_set() {
+        let f = Fixture::new("[sandbox.nono]\nherdr = false");
+        fs::create_dir_all(f.home.join("repo/.git")).unwrap();
+        f.write(&format!("repo/{PROJECT_FILE}"), "[sandbox]\nread = []");
+        assert_eq!(f.resolve("repo", None).unwrap().nono.herdr, Some(false));
+
+        f.write(
+            &format!("repo/{LOCAL_FILE}"),
+            "[agents.claude]\nsandbox.nono.herdr = true",
+        );
+        assert_eq!(f.resolve("repo", None).unwrap().nono.herdr, Some(true));
+        assert_eq!(
+            f.resolve("repo", Some("pi")).unwrap().nono.herdr,
             Some(false)
         );
     }

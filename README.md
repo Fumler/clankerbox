@@ -173,9 +173,8 @@ is allowed and your environment is passed through.
   the sandbox). When a command fails with a permission error, its hooks ask Claude to confirm the
   cause with `nono why` and suggest the `cb` flag or config entry that would fix it. Your own
   plugins still load. The hooks run `cb hook explain-denial`, so the sandbox can also read the
-  `cb` binary. Turn this off with `sandbox.nono.explain_denials = false`, e.g. for a
-  `kind = "claude"` agent whose command is a wrapper (`npx`) that doesn't take Claude Code's
-  flags.
+  `cb` binary. Turn this off with `sandbox.nono.explain_denials = false`.
+- **Herdr socket:** inside a [Herdr](#herdr) pane, connect access to `$HERDR_SOCKET_PATH`.
 
 ### Detected toolchains
 
@@ -302,6 +301,42 @@ sandbox.allow = ["~/.claude-personal"]
   profile extending the base one to `$XDG_RUNTIME_DIR/clankerbox` (or `$XDG_CACHE_HOME/clankerbox`).
   nono can't extend a profile file, so for a built-in `cb:` profile or a profile file (a path,
   relative to the directory the agent runs in) cb writes a copy with the groups added instead.
+
+## Herdr
+
+[Herdr](https://herdr.dev) finds agents by their pane's foreground process, which in supervised
+mode is nono rather than Claude. Its own Claude integration also resumes sessions with plain
+`claude --resume`, outside the sandbox. So when `cb` starts Claude Code in a Herdr pane
+(`HERDR_ENV=1`), in either mode, cb's Claude Code plugin reports the agent itself:
+
+- **State:** working, blocked on a permission prompt, or idle, from Claude Code's hooks
+  (`cb hook herdr`). Subagents' events are ignored.
+- **Resume:** after a Herdr restart, the pane comes back through `cb ... -- --resume <session>`
+  with the options that affect the session (`-A`, `-p`, `--nono-profile`, the directory,
+  sandbox arguments), so it keeps its sandbox and cb profile. Agent arguments after `--` are
+  not kept, since a prompt among them would be sent again; put lasting ones in the agent's
+  `args`. `-y` is not kept either, so new detected grants still need approval.
+  `CLAUDE_CONFIG_DIR` and `CLANKERBOX_VAR_*` from your environment are passed along with
+  `env`. A command Herdr wouldn't accept (an argument with `'`, over 64 arguments or 8 KiB) is
+  left out; state is still reported.
+- **Herdr's own Claude hook:** once it reports a session, Herdr ignores cb's reports for the
+  pane. After you approve a run inside Herdr, cb adds one line to that hook
+  (`herdr-agent-state.sh`, found through the hook commands in Claude's `settings.json`) so it
+  skips sessions cb reports. Other Claude sessions are unaffected, and the agent still sees
+  `HERDR_*`. cb only edits Herdr's own copy: never through a symlink, and only a script with
+  Herdr's Claude integration header; otherwise it warns.
+
+This needs Herdr 0.9.2 or later and an agent with `kind = "claude"`. Outside Herdr, cb adds
+nothing.
+
+> [!WARNING]
+> Reporting needs the Herdr socket, so the sandbox can connect to it, and anything that can
+> connect to it can control every Herdr pane, e.g. type into an unsandboxed shell. On Linux,
+> nono's sandbox could already connect to it without this grant. Turn the integration off with
+> `sandbox.nono.herdr = false`.
+
+`HERDR_AGENT` only helps Herdr's own process and screen detection, which can't see the agent
+in supervised mode. You can leave it set, but cb's reports don't need it.
 
 ## License
 

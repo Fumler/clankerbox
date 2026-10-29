@@ -162,10 +162,9 @@ fn runs_nono_with_project_grants_after_trust() {
     assert!(r.has("--read", frontend.to_str().unwrap()));
     assert!(r.nono.contains(&"--block-net".to_owned()));
     assert_eq!(r.agent[0], "claude");
-    assert!(
-        r.agent
-            .ends_with(&["--model".into(), "opus".into(), "--resume".into()])
-    );
+    assert_eq!(r.agent[1..3], ["--model", "opus"]);
+    assert_eq!(r.agent[3], "--plugin-dir");
+    assert_eq!(r.agent.last().unwrap(), "--resume");
     assert_eq!(
         r.tail,
         [
@@ -216,7 +215,7 @@ fn agent_flag_and_global_config() {
     let r = run(&env.stdout(&["-A", "mine"]));
     assert_eq!(r.base_profile(), "p");
     assert_eq!(r.agent[0], "claude");
-    assert!(r.agent.ends_with(&["--mine".into()]));
+    assert_eq!(r.agent[1..3], ["--mine", "--plugin-dir"]);
 }
 
 #[test]
@@ -671,4 +670,167 @@ fn doctor_checks_profile_paths() {
         .stdout(predicate::str::contains(
             "nono profile `./typo.json` not found",
         ));
+}
+
+fn herdr_server(socket: &Path) -> std::thread::JoinHandle<Vec<serde_json::Value>> {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::os::unix::net::UnixListener::bind(socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    std::thread::spawn(move || {
+        let mut requests = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            let Ok((stream, _)) = listener.accept() else {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                continue;
+            };
+            stream.set_nonblocking(false).unwrap();
+            let mut line = String::new();
+            let mut reader = BufReader::new(&stream);
+            reader.read_line(&mut line).unwrap();
+            let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+            let reply = serde_json::json!({ "id": request["id"], "result": { "type": "ok" } });
+            (&stream)
+                .write_all(format!("{reply}\n").as_bytes())
+                .unwrap();
+            let release = request["method"] == "pane.release_agent";
+            requests.push(request);
+            if release {
+                break;
+            }
+        }
+        requests
+    })
+}
+
+#[test]
+fn herdr_hook_reports_to_socket_silently() {
+    let env = Env::new();
+    let socket = env.path("herdr.sock");
+    let server = herdr_server(&socket);
+    let hook = |input: &str, herdr: bool| {
+        let mut cmd = env.cmd(&["hook", "herdr"]);
+        if herdr {
+            cmd.env("HERDR_ENV", "1")
+                .env("HERDR_PANE_ID", "w1:p1")
+                .env("HERDR_SOCKET_PATH", &socket)
+                .env("CLANKERBOX_RESUME_ARGV", r#"["cb","-p","personal","--"]"#);
+        }
+        cmd.write_stdin(input).assert().success().stdout("");
+    };
+    hook(
+        r#"{"hook_event_name":"SessionStart","session_id":"abc","source":"startup"}"#,
+        false,
+    );
+    hook("not json", true);
+    hook(
+        r#"{"hook_event_name":"SessionStart","session_id":"abc","source":"startup"}"#,
+        true,
+    );
+    hook(
+        r#"{"hook_event_name":"SessionEnd","session_id":"abc","reason":"prompt_input_exit"}"#,
+        true,
+    );
+    let requests = server.join().unwrap();
+    let methods: Vec<_> = requests.iter().map(|r| r["method"].clone()).collect();
+    assert_eq!(
+        methods,
+        [
+            "pane.report_agent",
+            "pane.report_agent_session",
+            "pane.release_agent"
+        ]
+    );
+    let report = &requests[0]["params"];
+    assert_eq!(report["pane_id"], "w1:p1");
+    assert_eq!(report["source"], "clankerbox");
+    assert_eq!(report["state"], "idle");
+    assert_eq!(
+        report["resume_argv"],
+        serde_json::json!(["cb", "-p", "personal", "--", "--resume", "abc"])
+    );
+    assert!(requests[1]["params"]["seq"].as_u64() > report["seq"].as_u64());
+    assert!(requests[2]["params"]["seq"].as_u64() > requests[1]["params"]["seq"].as_u64());
+
+    fs::remove_file(&socket).unwrap();
+    hook(r#"{"hook_event_name":"Stop","session_id":"abc"}"#, true);
+}
+
+#[test]
+fn herdr_pane_grants_socket_and_passes_resume_command() {
+    let env = Env::new();
+    let socket = env.path("herdr.sock");
+    let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let herdr = |args: &[&str]| {
+        let out = env
+            .cmd(args)
+            .env("HERDR_ENV", "1")
+            .env("HERDR_PANE_ID", "w1:p1")
+            .env("HERDR_SOCKET_PATH", &socket)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        String::from_utf8(out).unwrap()
+    };
+
+    let native = "# HERDR_INTEGRATION_ID=claude\nset -eu\n\
+                  [ \"${HERDR_ENV:-}\" = \"1\" ] || exit 0\nreport\n";
+    env.write("home/.claude/hooks/herdr-agent-state.sh", native);
+    env.write(
+        "home/.claude/settings.json",
+        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"bash '~/.claude/hooks/herdr-agent-state.sh' session"}]}]}}"#,
+    );
+    let dry = herdr(&["--dry-run", "--", "--model", "opus", "-c"]);
+    let script = env.path("home/.claude/hooks/herdr-agent-state.sh");
+    assert_eq!(fs::read_to_string(&script).unwrap(), native);
+    env.cmd(&[])
+        .env("HERDR_ENV", "1")
+        .env("HERDR_PANE_ID", "w1:p1")
+        .env("HERDR_SOCKET_PATH", &socket)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no .clankerbox.toml"));
+    assert_eq!(fs::read_to_string(&script).unwrap(), native);
+
+    let r = run(&herdr(&["-y", "--", "--model", "opus", "-c"]));
+    assert!(r.has("--allow-unix-socket", socket.to_str().unwrap()));
+    let plugin = &r.agent[r.agent.iter().position(|a| a == "--plugin-dir").unwrap() + 1];
+    let hooks = fs::read_to_string(Path::new(plugin).join("hooks/hooks.json")).unwrap();
+    assert!(hooks.contains("hook herdr"), "{hooks}");
+    let patched = fs::read_to_string(&script).unwrap();
+    assert!(patched.contains("CLANKERBOX_HERDR"), "{patched}");
+
+    let repo = env.path("home/repo");
+    let resume = format!(r#"["cb","-C","{}","--"]"#, repo.display());
+    assert!(
+        dry.starts_with(&format!(
+            "CLANKERBOX_HERDR=1 CLANKERBOX_RESUME_ARGV='{resume}' nono run"
+        )),
+        "{dry}"
+    );
+    let show = herdr(&["show"]);
+    assert!(show.contains("every Herdr pane"), "{show}");
+    let json: serde_json::Value =
+        serde_json::from_str(&herdr(&["show", "--json", "--", "--model", "opus"])).unwrap();
+    assert_eq!(json["env"]["CLANKERBOX_RESUME_ARGV"], resume);
+
+    let plain = run(&env.stdout(&["-y"]));
+    assert!(!plain.nono.iter().any(|a| a.contains("unix-socket")));
+    assert!(!env.stdout(&["show"]).contains("Herdr"));
+    assert!(
+        !env.stdout(&["--dry-run"])
+            .contains("CLANKERBOX_RESUME_ARGV")
+    );
+
+    env.write(
+        "config/clankerbox/config.toml",
+        "[sandbox.nono]\nherdr = false",
+    );
+    let off = herdr(&["--dry-run"]);
+    assert!(
+        !off.contains("unix-socket") && !off.contains("RESUME"),
+        "{off}"
+    );
 }

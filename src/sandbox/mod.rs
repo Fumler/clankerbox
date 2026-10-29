@@ -19,18 +19,20 @@ use serde::Serialize;
 pub use self::claude_plugin::explain_denial;
 pub use self::nono::{Nono, check_profile as check_nono_profile};
 pub use self::unsandboxed::Unsandboxed;
+use crate::cli::RunArgs;
 use crate::config::Resolved;
 use crate::config::model::BackendKind;
 use crate::context::Dirs;
+use crate::herdr::Host;
 use crate::policy::Policy;
 
 #[derive(Debug)]
 pub struct Request<'a> {
     pub policy: &'a Policy,
-    /// From the command line; config-file backend args are in `Policy::extra_args`.
-    pub passthrough: &'a [OsString],
+    pub run: &'a RunArgs,
     pub program: &'a str,
-    pub args: Vec<OsString>,
+    /// cb's own agent flags go after these, so a wrapper command (`npx <package>`) passes them on.
+    pub config_args: &'a [String],
     /// Must be the directory config was discovered from, or grants won't match what runs.
     pub cwd: &'a Path,
 }
@@ -59,6 +61,11 @@ pub trait Sandbox {
         Ok(())
     }
 
+    /// Only after the user has approved the run: it changes files outside the sandbox.
+    fn prepare(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     fn build(&self, request: &Request<'_>) -> Result<Launch>;
 
     /// Access the backend allows on top of `Policy` grants, as lines for the user.
@@ -75,7 +82,7 @@ pub trait Sandbox {
     }
 }
 
-pub fn backend(resolved: &Resolved, dirs: &Dirs) -> Box<dyn Sandbox> {
+pub fn backend(resolved: &Resolved, dirs: &Dirs, herdr: Option<&Host>) -> Box<dyn Sandbox> {
     match resolved.backend {
         BackendKind::Nono => Box::new(Nono {
             options: resolved.nono.clone(),
@@ -83,6 +90,8 @@ pub fn backend(resolved: &Resolved, dirs: &Dirs) -> Box<dyn Sandbox> {
             cb: std::env::current_exe().unwrap_or_else(|_| "cb".into()),
             home: dirs.home.clone(),
             runtime_dir: dirs.runtime.clone(),
+            herdr: herdr.cloned(),
+            claude_config: resolved.claude_config.clone(),
         }),
         BackendKind::None => Box::new(Unsandboxed),
     }
