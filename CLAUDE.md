@@ -1,7 +1,7 @@
 # clankerbox
 
 Rust CLI (`cb`) that runs AI coding agents inside a sandbox (nono), configured per project.
-See README.md for behaviour and config format.
+See README.md for an overview and `docs/` for config and sandbox details.
 
 ## Commands
 
@@ -23,6 +23,9 @@ shell via direnv for humans; tool shells don't load it, so keep using `nix devel
 - Commit messages follow Conventional Commits (`feat:`, `fix:`, `feat!:` …). The CI - Lint and
   test workflow rejects others, and git-cliff derives the next version and `CHANGELOG.md` from them.
   Preview with `nix develop path:. -c git cliff --unreleased`.
+- Update README.md and `docs/` in the same change as user-visible behaviour. README is for
+  newcomers (what, install, use, risks); reference detail goes in `docs/`. Keep both terse: no
+  filler, one fact per bullet, no repeating a fact across files.
 - `///` docs on `src/config/model.rs` and `src/cli.rs` types become `cb schema` and `--help`
   text; write them for users.
 - Sandbox backends go in `src/sandbox/` behind the `Sandbox` trait. Keep backend-specific logic
