@@ -21,6 +21,7 @@ impl Sandbox for Unsandboxed {
                 .chain(request.run.agent_args.iter().cloned())
                 .collect(),
             env: request.policy.env.clone(),
+            env_remove: request.policy.env_remove.clone(),
             cwd: request.cwd.to_path_buf(),
             files: Vec::new(),
         })

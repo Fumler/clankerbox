@@ -4,7 +4,7 @@ use anstream::println;
 use anyhow::Result;
 use serde::Serialize;
 
-use super::{Session, grant_lines, network_label, warn};
+use super::{Session, grant_lines, network_label, notes, warn};
 use crate::cli::RunArgs;
 use crate::config::model::{BackendKind, NonoConfig};
 use crate::policy::Policy;
@@ -78,7 +78,7 @@ pub fn show(run: &RunArgs, json: bool) -> Result<()> {
         policy: &resolved.policy,
         base_access: backend.base_access(),
         full_access,
-        notes: backend.notes(),
+        notes: notes(&*backend, &resolved),
         nono: &resolved.nono,
         generated_files: &launch.files,
         command: std::iter::once(&launch.program)
@@ -129,9 +129,15 @@ pub fn show(run: &RunArgs, json: bool) -> Result<()> {
         "{LABEL}network{LABEL:#}       {}",
         network_label(resolved.policy.network)
     );
-    for (k, v) in report.env {
-        println!("{LABEL}env{LABEL:#}           {k}={v}");
+    for socket in report
+        .policy
+        .sockets
+        .iter()
+        .filter(|_| resolved.sandboxed())
+    {
+        println!("{LABEL}socket{LABEL:#}        {}", socket.display());
     }
+    print_env(&report);
     for file in report.generated_files {
         println!("{LABEL}generated{LABEL:#}     {}", file.path.display());
     }
@@ -140,6 +146,15 @@ pub fn show(run: &RunArgs, json: bool) -> Result<()> {
         println!("{WARN}warning{WARN:#}       {warning}");
     }
     Ok(())
+}
+
+fn print_env(report: &Report<'_>) {
+    for k in &report.policy.env_remove {
+        println!("{LABEL}env{LABEL:#}           unset {k}");
+    }
+    for (k, v) in report.env {
+        println!("{LABEL}env{LABEL:#}           {k}={v}");
+    }
 }
 
 fn print_sandbox_rules(report: &Report<'_>) {

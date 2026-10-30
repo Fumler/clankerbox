@@ -97,6 +97,10 @@ Personal defaults (preferred agent, access you want everywhere) go in the
 - **Herdr:** inside a [Herdr](https://herdr.dev) pane, the sandbox can connect to Herdr's
   socket, and through it control every pane, including unsandboxed shells. Turn it off with
   `sandbox.nono.herdr = false`. See [docs/herdr.md](docs/herdr.md).
+- **Orca:** inside an [Orca](https://github.com/stablyai/orca) terminal, the agent can read Orca's
+  hook scripts and its hook endpoint (a port and token), and Claude Code uses the account selected
+  in Orca. Turn it off with `sandbox.orca = false`. `sandbox.orca_cli = true` in the global config
+  also allows the `orca` CLI, which can control every Orca terminal. See [docs/orca.md](docs/orca.md).
 
 Everything a run grants, and why: [docs/sandbox.md](docs/sandbox.md).
 
@@ -178,6 +182,7 @@ key, precedence, variables and cb profiles.
 - [docs/configuration.md](docs/configuration.md): config layers, variables, agents and cb profiles
 - [docs/sandbox.md](docs/sandbox.md): what the agent can access, and how cb drives nono
 - [docs/herdr.md](docs/herdr.md): Herdr integration
+- [docs/orca.md](docs/orca.md): Orca integration
 - [CONTRIBUTING.md](CONTRIBUTING.md): building, testing and releasing
 - [CHANGELOG.md](CHANGELOG.md)
 

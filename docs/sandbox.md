@@ -41,6 +41,10 @@ is allowed and your environment is passed through.
   plugins still load. The hooks run `cb hook explain-denial`, so the sandbox can also read the
   `cb` binary. Turn off with `sandbox.nono.explain_denials = false`.
 - **Herdr socket:** inside a [Herdr](herdr.md) pane, connect access to `$HERDR_SOCKET_PATH`.
+- **Orca:** inside an [Orca](orca.md) terminal:
+  - Read access to Orca's hook scripts and endpoint, for any agent.
+  - For `claude`, read-write access to the Claude account selected in Orca.
+  - With `sandbox.orca_cli = true`, connect access to Orca's socket and read access to the CLI.
 
 ### Detected toolchains
 

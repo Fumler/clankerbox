@@ -286,6 +286,9 @@ impl Sandbox for Nono {
             };
             args.extend([flag.into(), grant.path.clone().into()]);
         }
+        for socket in &policy.sockets {
+            args.extend(["--allow-unix-socket".into(), socket.clone().into()]);
+        }
         if policy.network == Network::Block {
             args.push("--block-net".into());
         }
@@ -313,6 +316,7 @@ impl Sandbox for Nono {
             program: "nono".into(),
             args,
             env,
+            env_remove: policy.env_remove.clone(),
             files,
             cwd: request.cwd.to_path_buf(),
         })
@@ -372,10 +376,8 @@ impl Sandbox for Nono {
         // After the subcommand; `-v` lists group paths, the log file hides `-v` logs.
         let dry_run = ["--dry-run", "-v", "--log-file", "/dev/null"].map(OsString::from);
         args.splice(1..1, dry_run);
-        let out = Command::new(&launch.program)
-            .args(&args)
-            .envs(&launch.env)
-            .current_dir(&launch.cwd)
+        let out = launch
+            .command_with_args(&args)
             .stdin(Stdio::null())
             .output()
             .context("cannot run nono")?;

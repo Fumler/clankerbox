@@ -9,12 +9,11 @@ use anyhow::{Result, bail};
 
 use super::{
     Session, cache_grants_text, confirm, display_home, grant_lines, interactive, network_label,
-    warn,
+    notes, warn,
 };
 use crate::cli::RunArgs;
 use crate::config::Resolved;
 use crate::config::discover::{Layer, Origin, PROJECT_FILE};
-use crate::config::model::BackendKind;
 use crate::policy::{Access, Grant, Source};
 use crate::sandbox::Sandbox;
 use crate::style::{DIM, ERROR, LABEL};
@@ -23,6 +22,9 @@ pub fn run(args: &RunArgs) -> Result<Infallible> {
     let session = Session::open(&args.global)?;
     let resolved = session.resolve()?;
     let backend = session.backend(&resolved);
+    if let Some(blocker) = &resolved.blocker {
+        bail!("{blocker}");
+    }
     if args.global.dry_run {
         for warning in &resolved.warnings {
             warn(warning);
@@ -37,7 +39,7 @@ pub fn run(args: &RunArgs) -> Result<Infallible> {
     for warning in &resolved.warnings {
         warn(warning);
     }
-    if resolved.backend == BackendKind::None {
+    if !resolved.sandboxed() {
         eprintln!(
             "cb: {ERROR}WARNING: running {} WITHOUT a sandbox{ERROR:#}",
             resolved.agent.command
@@ -145,7 +147,11 @@ fn review_text(
             write_file_review(&mut out, layer, resolved);
         }
     }
-    for line in backend.base_access().iter().chain(&backend.notes()) {
+    for line in backend
+        .base_access()
+        .iter()
+        .chain(&notes(backend, resolved))
+    {
         let _ = writeln!(out, "  {DIM}{line}{DIM:#}");
     }
     let _ = writeln!(
@@ -228,6 +234,10 @@ mod tests {
             state: home.join("state"),
             runtime: home.join("run"),
             claude_config: None,
+            orca: Some(crate::orca::Pane {
+                scripts: home.join(".orca/agent-hooks"),
+                ..crate::orca::Pane::default()
+            }),
         };
         let mut discovered = discover(&home.join("repo"), &dirs, false).unwrap();
         discovered.detect(&dirs, false).unwrap();
@@ -253,6 +263,7 @@ mod tests {
         let home = tmp.path().canonicalize().unwrap();
         fs::create_dir_all(home.join("repo/.git")).unwrap();
         fs::write(home.join("repo/Cargo.toml"), "").unwrap();
+        fs::create_dir_all(home.join(".orca/agent-hooks")).unwrap();
 
         let detected = prompt(&home);
         assert!(detected.contains("detected rust"), "{detected}");
@@ -274,6 +285,7 @@ mod tests {
             );
             assert!(text.contains("network:"), "{text}");
             assert!(text.contains("explains sandbox denials"), "{text}");
+            assert!(text.contains("sandbox.orca = false"), "{text}");
         }
     }
 }

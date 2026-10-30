@@ -42,6 +42,7 @@ pub struct Launch {
     pub program: OsString,
     pub args: Vec<OsString>,
     pub env: BTreeMap<String, String>,
+    pub env_remove: Vec<String>,
     pub cwd: PathBuf,
     pub files: Vec<GeneratedFile>,
 }
@@ -108,12 +109,22 @@ impl Launch {
 
     pub fn exec(self) -> Result<Infallible> {
         self.write_files()?;
-        let err = Command::new(&self.program)
-            .args(&self.args)
-            .envs(&self.env)
-            .current_dir(&self.cwd)
-            .exec();
+        let err = self.command().exec();
         Err(err).with_context(|| format!("cannot execute {}", self.program.to_string_lossy()))
+    }
+
+    pub fn command(&self) -> Command {
+        self.command_with_args(&self.args)
+    }
+
+    pub fn command_with_args(&self, args: &[OsString]) -> Command {
+        let mut command = Command::new(&self.program);
+        command.args(args).current_dir(&self.cwd);
+        for name in &self.env_remove {
+            command.env_remove(name);
+        }
+        command.envs(&self.env);
+        command
     }
 
     /// Shell-quoted, for display only.
@@ -125,6 +136,14 @@ impl Launch {
                 "cd {} &&",
                 shell_quote(&self.cwd.to_string_lossy())
             ));
+        }
+        if !self.env_remove.is_empty() {
+            parts.push("env".to_owned());
+            parts.extend(
+                self.env_remove
+                    .iter()
+                    .map(|n| format!("-u {}", shell_quote(n))),
+            );
         }
         parts.extend(
             self.env
@@ -179,6 +198,35 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     use super::*;
+
+    #[test]
+    fn launch_removes_env_before_setting_it() {
+        let launch = Launch {
+            program: "nono".into(),
+            args: Vec::new(),
+            env: BTreeMap::from([("A".into(), "1".into())]),
+            env_remove: vec!["CLAUDE_CONFIG_DIR".into()],
+            cwd: std::env::current_dir().unwrap(),
+            files: Vec::new(),
+        };
+        let envs: Vec<_> = launch
+            .command()
+            .get_envs()
+            .map(|(k, v)| (k.to_owned(), v.map(ToOwned::to_owned)))
+            .collect();
+        assert_eq!(
+            envs,
+            [
+                ("A".into(), Some("1".into())),
+                ("CLAUDE_CONFIG_DIR".into(), None)
+            ]
+        );
+        assert!(
+            launch
+                .display_shell()
+                .starts_with("env -u CLAUDE_CONFIG_DIR A=1 nono")
+        );
+    }
 
     #[test]
     fn private_writes_create_owner_only_dirs_and_reject_shared_ones() {

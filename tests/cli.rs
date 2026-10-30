@@ -66,15 +66,13 @@ impl Env {
     }
 
     fn stdout(&self, args: &[&str]) -> String {
-        let out = self
-            .cmd(args)
-            .assert()
-            .success()
-            .get_output()
-            .stdout
-            .clone();
-        String::from_utf8(out).unwrap()
+        stdout_of(&mut self.cmd(args))
     }
+}
+
+fn stdout_of(cmd: &mut Command) -> String {
+    let out = cmd.assert().success().get_output().stdout.clone();
+    String::from_utf8(out).unwrap()
 }
 
 /// What the stub `nono` printed: its own arguments, the agent command with its arguments, and
@@ -608,15 +606,10 @@ fn subdirs_are_searched_only_in_repositories() {
     }
     fs::create_dir_all(env.path("home/jj/.jj")).unwrap();
     let show = |dir: &str, args: &[&str]| {
-        let out = env
-            .cmd(&[&["show"], args].concat())
-            .current_dir(env.path(dir))
-            .assert()
-            .success()
-            .get_output()
-            .stdout
-            .clone();
-        String::from_utf8(out).unwrap()
+        stdout_of(
+            env.cmd(&[&["show"], args].concat())
+                .current_dir(env.path(dir)),
+        )
     };
     let m2 = "repository  ← detected toolchains";
     assert!(!show("home/plain", &[]).contains(m2));
@@ -762,17 +755,12 @@ fn herdr_pane_grants_socket_and_passes_resume_command() {
     let socket = env.path("herdr.sock");
     let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
     let herdr = |args: &[&str]| {
-        let out = env
-            .cmd(args)
-            .env("HERDR_ENV", "1")
-            .env("HERDR_PANE_ID", "w1:p1")
-            .env("HERDR_SOCKET_PATH", &socket)
-            .assert()
-            .success()
-            .get_output()
-            .stdout
-            .clone();
-        String::from_utf8(out).unwrap()
+        stdout_of(
+            env.cmd(args)
+                .env("HERDR_ENV", "1")
+                .env("HERDR_PANE_ID", "w1:p1")
+                .env("HERDR_SOCKET_PATH", &socket),
+        )
     };
 
     let native = "# HERDR_INTEGRATION_ID=claude\nset -eu\n\
@@ -833,4 +821,147 @@ fn herdr_pane_grants_socket_and_passes_resume_command() {
         !off.contains("unix-socket") && !off.contains("RESUME"),
         "{off}"
     );
+}
+
+#[test]
+fn orca_pane_grants_hooks_read_only_and_follows_account_switch() {
+    let env = Env::new();
+    let scripts = env.path("home/.orca/agent-hooks");
+    let endpoint = env.path("orca-data/agent-hooks");
+    let account = env.path("orca-data/claude-profiles/b/home");
+    fs::create_dir_all(&scripts).unwrap();
+    fs::create_dir_all(&endpoint).unwrap();
+    fs::create_dir_all(&account).unwrap();
+    env.write("orca-data/pointer", &format!("{}\n", account.display()));
+    let orca = |args: &[&str]| {
+        stdout_of(
+            env.cmd(args)
+                .env("ORCA_PANE_KEY", "tab:1")
+                .env("ORCA_AGENT_HOOK_ENDPOINT", endpoint.join("endpoint.env"))
+                .env("ORCA_AGENT_HOOK_PORT", "4123")
+                .env("ORCA_CLAUDE_PROFILE_POINTER", env.path("orca-data/pointer"))
+                .env(
+                    "CLAUDE_CONFIG_DIR",
+                    env.path("orca-data/claude-profiles/a/home"),
+                )
+                .env(
+                    "ORCA_CLAUDE_INJECTED_CONFIG_DIR",
+                    env.path("orca-data/claude-profiles/a/home"),
+                ),
+        )
+    };
+
+    let r = run(&orca(&["-y"]));
+    assert!(r.has("--read", scripts.to_str().unwrap()));
+    assert!(r.has("--read", endpoint.to_str().unwrap()));
+    assert!(!r.has("--allow", scripts.to_str().unwrap()));
+    assert!(r.has("--allow", account.to_str().unwrap()));
+    assert!(!r.nono.contains(&"--open-port".to_owned()));
+    let dry = orca(&["--dry-run"]);
+    assert!(
+        dry.starts_with(&format!("CLAUDE_CONFIG_DIR={} nono run", account.display())),
+        "{dry}"
+    );
+    let show = orca(&["show"]);
+    assert!(show.contains("Orca hook scripts"), "{show}");
+    assert!(show.contains("sandbox.orca = false"), "{show}");
+
+    let unsandboxed = orca(&["--unsandboxed", "show"]);
+    assert!(!unsandboxed.contains("in an Orca pane"), "{unsandboxed}");
+
+    env.write(
+        "orca-data/pointer",
+        &env.path("orca-data/gone").display().to_string(),
+    );
+    let previous = env.path("orca-data/claude-profiles/a/home");
+    fs::create_dir_all(&previous).unwrap();
+    let blocked = |args: &[&str]| {
+        env.cmd(args)
+            .env("ORCA_PANE_KEY", "tab:1")
+            .env("ORCA_CLAUDE_PROFILE_POINTER", env.path("orca-data/pointer"))
+            .env("CLAUDE_CONFIG_DIR", &previous)
+            .env("ORCA_CLAUDE_INJECTED_CONFIG_DIR", &previous)
+            .assert()
+    };
+    blocked(&["-y"])
+        .failure()
+        .stderr(predicate::str::contains("is missing"));
+    blocked(&["--dry-run"])
+        .failure()
+        .stderr(predicate::str::contains("is missing"));
+    let show = String::from_utf8(blocked(&["show"]).success().get_output().stdout.clone()).unwrap();
+    assert!(show.contains("is missing"), "{show}");
+    assert!(!show.contains("claude-profiles/a"), "{show}");
+
+    env.write("orca-data/pointer", "");
+    let dry = orca(&["--dry-run"]);
+    assert!(
+        dry.starts_with("env -u CLAUDE_CONFIG_DIR nono run"),
+        "{dry}"
+    );
+
+    env.write(
+        "config/clankerbox/config.toml",
+        "[sandbox]\nnetwork = \"block\"",
+    );
+    assert!(run(&orca(&["-y"])).has("--open-port", "4123"));
+
+    env.write("config/clankerbox/config.toml", "[sandbox]\norca = false");
+    let r = run(&orca(&["-y"]));
+    assert!(!r.nono.iter().any(|a| a.contains(".orca")));
+    assert!(!orca(&["--dry-run"]).contains("CLAUDE_CONFIG_DIR"));
+    assert!(!orca(&["show"]).contains("Orca"));
+}
+
+#[test]
+fn orca_cli_is_opt_in_and_grants_its_socket() {
+    let env = Env::new();
+    let data = env.path("orca-data");
+    let socket = data.join("o-42-rt.sock");
+    fs::create_dir_all(&data).unwrap();
+    let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    env.write(
+        "orca-data/orca-runtime.json",
+        &format!(
+            r#"{{"transports":[{{"kind":"unix","endpoint":"{}"}}]}}"#,
+            socket.display()
+        ),
+    );
+    let launcher = env.path("app/Orca/resources/bin/orca");
+    env.write("app/Orca/resources/bin/orca", "");
+    let orca = |args: &[&str]| {
+        stdout_of(
+            env.cmd(args)
+                .env("ORCA_PANE_KEY", "tab:1")
+                .env("ORCA_USER_DATA_PATH", &data)
+                .env("ORCA_CLI_COMMAND", &launcher),
+        )
+    };
+
+    let r = run(&orca(&["-y"]));
+    assert!(!r.nono.iter().any(|a| a.contains("unix-socket")));
+    assert!(!r.nono.iter().any(|a| a.contains("orca-runtime.json")));
+
+    env.write(
+        "config/clankerbox/config.toml",
+        "[sandbox]\norca_cli = true",
+    );
+    let r = run(&orca(&["-y"]));
+    assert!(r.has("--allow-unix-socket", socket.to_str().unwrap()));
+    assert!(r.has(
+        "--read-file",
+        data.join("orca-runtime.json").to_str().unwrap()
+    ));
+    assert!(r.has("--read", env.path("app/Orca").to_str().unwrap()));
+    let show = orca(&["show"]);
+    assert!(show.contains("every Orca terminal"), "{show}");
+    assert!(show.contains("o-42-rt.sock"), "{show}");
+
+    env.write(
+        "config/clankerbox/config.toml",
+        "[sandbox]\norca = false\norca_cli = true",
+    );
+    let r = run(&orca(&["-y"]));
+    assert!(r.has("--allow-unix-socket", socket.to_str().unwrap()));
+    assert!(!r.nono.iter().any(|a| a.contains("agent-hooks")));
 }

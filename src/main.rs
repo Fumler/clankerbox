@@ -3,6 +3,7 @@ mod commands;
 mod config;
 mod context;
 mod herdr;
+mod orca;
 mod policy;
 mod sandbox;
 mod style;

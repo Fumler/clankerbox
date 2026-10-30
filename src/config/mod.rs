@@ -14,7 +14,10 @@ use self::discover::{Discovered, Layer, Origin};
 use self::model::{BackendKind, ConfigFile, NonoConfig, Platform, SandboxConfig};
 use self::vars::Vars;
 use crate::context::{self, Dirs};
-use crate::policy::{Access, Grant, Policy, Source};
+use crate::orca;
+use crate::policy::{Access, Grant, Network, Policy, Source};
+
+const CLAUDE_CONFIG_DIR: &str = "CLAUDE_CONFIG_DIR";
 
 /// Subdirectories of Claude's config dir whose entries dotfiles managers commonly link.
 const CLAUDE_LINKED_DIRS: &[&str] = &["skills", "agents", "commands", "output-styles"];
@@ -27,7 +30,16 @@ pub struct Resolved {
     pub nono: NonoConfig,
     /// Never one a project file sets: cb follows paths its files name.
     pub claude_config: Option<PathBuf>,
+    pub notes: Vec<String>,
+    /// Stops a run, but not commands that only inspect it.
+    pub blocker: Option<String>,
     pub warnings: Vec<String>,
+}
+
+impl Resolved {
+    pub fn sandboxed(&self) -> bool {
+        self.backend != BackendKind::None
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +134,10 @@ pub fn resolve(
         nono: NonoConfig::default(),
         claude_config_env: dirs.claude_config.clone(),
         claude_config_layer: None,
+        orca: None,
+        orca_cli: None,
+        notes: Vec::new(),
+        blocker: None,
         warnings: Vec::new(),
     };
     builder.builtin_grants(d);
@@ -155,7 +171,8 @@ pub fn resolve(
         }
     }
     let command = command.with_context(|| format!("agent `{name}` has no `command`"))?;
-    let claude_config = builder.kind_grants(kind.as_deref(), d);
+    let claude_config = builder.claude_grants(kind.as_deref(), d, dirs);
+    builder.orca_grants(dirs);
 
     Ok(Resolved {
         agent: Agent {
@@ -168,6 +185,8 @@ pub fn resolve(
         policy: builder.policy,
         nono: builder.nono,
         claude_config,
+        notes: builder.notes,
+        blocker: builder.blocker,
         warnings: builder.warnings,
     })
 }
@@ -265,6 +284,10 @@ struct Builder {
     claude_config_env: Option<PathBuf>,
     /// The layer that set `CLAUDE_CONFIG_DIR` in config.
     claude_config_layer: Option<(Source, Origin)>,
+    orca: Option<bool>,
+    orca_cli: Option<bool>,
+    notes: Vec<String>,
+    blocker: Option<String>,
     warnings: Vec<String>,
 }
 
@@ -278,12 +301,20 @@ impl Builder {
                 d.project_root.display()
             ));
         } else {
-            self.grant_dir(d.project_root.clone(), Source::Builtin("project root"));
+            self.grant(
+                d.project_root.clone(),
+                Access::ReadWrite,
+                Source::Builtin("project root"),
+            );
         }
         if let Some(git) = &d.git
             && !git.common_dir.starts_with(&d.project_root)
         {
-            self.grant_dir(git.common_dir.clone(), Source::Builtin("git common dir"));
+            self.grant(
+                git.common_dir.clone(),
+                Access::ReadWrite,
+                Source::Builtin("git common dir"),
+            );
         }
     }
 
@@ -294,13 +325,11 @@ impl Builder {
         if let Some(main) = d.git.as_ref().and_then(|g| g.main_worktree())
             && let Ok(path) = main.join(".claude/settings.local.json").canonicalize()
         {
-            self.policy.grant(Grant {
+            self.grant(
                 path,
-                access: Access::ReadWrite,
-                file: true,
-                pin: false,
-                source: Source::Builtin("claude settings from main worktree"),
-            });
+                Access::ReadWrite,
+                Source::Builtin("claude settings from main worktree"),
+            );
         }
         let config_dir = self.claude_config_dir()?;
         self.claude_symlink_targets(&config_dir);
@@ -311,17 +340,17 @@ impl Builder {
     /// it. `None` when its symlinks must not be followed: a project file could otherwise point
     /// it at a repo directory whose links reach anywhere.
     fn claude_config_dir(&mut self) -> Option<PathBuf> {
-        let (raw, source, origin) = match self.policy.env.get("CLAUDE_CONFIG_DIR") {
+        let (raw, source, origin) = match self.policy.env.get(CLAUDE_CONFIG_DIR) {
             Some(value) => {
                 let (source, origin) = self.claude_config_layer.clone()?;
                 (PathBuf::from(value), source, origin)
             }
             None => match self.claude_config_env.clone() {
-                Some(raw) => (raw, Source::Builtin("CLAUDE_CONFIG_DIR"), Origin::Global),
+                Some(raw) => (raw, Source::Builtin(CLAUDE_CONFIG_DIR), Origin::Global),
                 None => return Some(self.vars.home.join(".claude")),
             },
         };
-        let entry = format!("CLAUDE_CONFIG_DIR={}", raw.display());
+        let entry = format!("{CLAUDE_CONFIG_DIR}={}", raw.display());
         let dir = match raw.canonicalize() {
             Ok(dir) if raw.is_absolute() && dir.is_dir() => dir,
             _ => {
@@ -333,17 +362,11 @@ impl Builder {
             self.warn(&source, &entry, "contains $HOME");
             return None;
         }
-        self.grant_dir(dir.clone(), source.clone());
+        self.grant(dir.clone(), Access::ReadWrite, source.clone());
         let mut lock = dir.clone().into_os_string();
         lock.push(".lock");
         if let Ok(lock) = PathBuf::from(lock).canonicalize() {
-            self.policy.grant(Grant {
-                path: lock,
-                access: Access::ReadWrite,
-                file: true,
-                pin: false,
-                source,
-            });
+            self.grant(lock, Access::ReadWrite, source);
         }
         matches!(origin, Origin::Preset | Origin::Global).then_some(dir)
     }
@@ -373,21 +396,149 @@ impl Builder {
             }
         }
         for target in compact(targets, &home) {
-            self.policy.grant(Grant {
-                file: !target.is_dir(),
-                path: target,
-                access: Access::Read,
-                pin: false,
-                source: Source::Builtin("claude config symlink"),
-            });
+            self.grant(
+                target,
+                Access::Read,
+                Source::Builtin("claude config symlink"),
+            );
         }
     }
 
-    fn grant_dir(&mut self, path: PathBuf, source: Source) {
+    fn claude_grants(
+        &mut self,
+        kind: Option<&str>,
+        d: &Discovered,
+        dirs: &Dirs,
+    ) -> Option<PathBuf> {
+        let account = self
+            .orca_pane(dirs)
+            .filter(|_| kind == Some("claude"))
+            .filter(|_| !self.policy.env.contains_key(CLAUDE_CONFIG_DIR))
+            .map(|pane| &pane.claude_account);
+        match account {
+            Some(orca::Account::Dir(dir)) if dir.is_dir() => {
+                let dir = dir.to_string_lossy().into_owned();
+                self.policy.env.insert(CLAUDE_CONFIG_DIR.into(), dir);
+                self.claude_config_layer = Some((Source::Builtin("Orca account"), Origin::Global));
+            }
+            Some(orca::Account::Default) => {
+                self.claude_config_env = None;
+                if dirs.claude_config.is_some() {
+                    self.policy.env_remove.push(CLAUDE_CONFIG_DIR.into());
+                }
+            }
+            // Blocked below; `env` still names the previous account.
+            Some(orca::Account::Dir(_) | orca::Account::Invalid(_)) => {
+                self.claude_config_env = None;
+            }
+            Some(orca::Account::Unmanaged) | None => {}
+        }
+        let claude_config = self.kind_grants(kind, d);
+        self.blocker = match account {
+            Some(orca::Account::Dir(dir)) if !dir.is_dir() => {
+                let missing = format!(
+                    "Orca's selected Claude account folder {} is missing; sign in to it again or \
+                     choose another account in Orca",
+                    dir.display()
+                );
+                self.warnings.push(missing.clone());
+                Some(missing)
+            }
+            Some(orca::Account::Invalid(e)) => {
+                self.warnings.push(e.clone());
+                Some(e.clone())
+            }
+            Some(orca::Account::Dir(dir)) if claude_config.is_none() => Some(format!(
+                "cannot grant Orca's selected Claude account folder {}",
+                dir.display()
+            )),
+            Some(orca::Account::Dir(dir)) => {
+                self.notes.push(format!(
+                    "Claude Code uses the account selected in Orca, {} (read-write); it follows \
+                     Orca's account switcher",
+                    dir.display()
+                ));
+                None
+            }
+            _ => None,
+        };
+        claude_config
+    }
+
+    fn orca_pane<'a>(&self, dirs: &'a Dirs) -> Option<&'a orca::Pane> {
+        dirs.orca.as_ref().filter(|_| self.orca != Some(false))
+    }
+
+    fn orca_grants(&mut self, dirs: &Dirs) {
+        if let Some(pane) = self.orca_pane(dirs) {
+            self.orca_hook_grants(pane);
+        }
+        // Independent of `orca`, which a project file can set.
+        let Some(pane) = dirs.orca.as_ref() else {
+            return;
+        };
+        if self.orca_cli == Some(true)
+            && let Some(note) = self.orca_cli_grants(pane)
+        {
+            self.notes.push(note);
+        }
+    }
+
+    /// Read-only: unsandboxed panes run these scripts and source the endpoint file.
+    fn orca_hook_grants(&mut self, pane: &orca::Pane) {
+        let dirs = [
+            (Some(&pane.scripts), "Orca hook scripts"),
+            (pane.endpoint_dir.as_ref(), "Orca hook endpoint"),
+        ];
+        let mut granted = false;
+        for (dir, what) in dirs {
+            if let Some(Ok(path)) = dir.map(|d| d.canonicalize())
+                && !self.vars.home.starts_with(&path)
+            {
+                self.grant(path, Access::Read, Source::Builtin(what));
+                granted = true;
+            }
+        }
+        if !granted {
+            return;
+        }
+        if self.policy.network == Network::Block
+            && let Some(port) = pane.port
+        {
+            extend_unique(&mut self.policy.open_ports, &[port]);
+        }
+        self.notes.push(
+            "in an Orca pane: read access to Orca's hook scripts and endpoint, so Orca shows the \
+             agent's status; turn off with `sandbox.orca = false`"
+                .to_owned(),
+        );
+    }
+
+    fn orca_cli_grants(&mut self, pane: &orca::Pane) -> Option<String> {
+        let cli = pane.cli(&self.vars.home);
+        let source = Source::Builtin("Orca CLI");
+        let Some(socket) = cli.socket else {
+            self.warn(&source, "orca_cli", "cannot find Orca's runtime socket");
+            return None;
+        };
+        for path in cli.metadata.into_iter().chain(cli.dirs) {
+            self.grant(path, Access::Read, source.clone());
+        }
+        let note = format!(
+            "`sandbox.orca_cli` lets the agent connect to Orca's socket {}: it can control every \
+             Orca terminal, including unsandboxed shells",
+            socket.display()
+        );
+        self.policy.sockets.push(socket);
+        Some(note)
+    }
+
+    /// `path` must exist: whether it is a file decides the kind of grant.
+    fn grant(&mut self, path: PathBuf, access: Access, source: Source) {
         self.policy.grant(Grant {
+            file: !path.is_dir(),
             path,
-            access: Access::ReadWrite,
-            file: false,
+            access,
             pin: false,
             source,
         });
@@ -397,6 +548,19 @@ impl Builder {
         let source = source_of(layer);
         if sandbox.backend.is_some() {
             self.backend = sandbox.backend;
+        }
+        if sandbox.orca.is_some() {
+            self.orca = sandbox.orca;
+        }
+        // Gives control of unsandboxed Orca terminals, so a project file must not turn it on.
+        if sandbox.orca_cli.is_some() {
+            if layer.origin == Origin::Global {
+                self.orca_cli = sandbox.orca_cli;
+            } else {
+                self.warnings.push(format!(
+                    "{layer}: ignoring `orca_cli`; it only works in the global config"
+                ));
+            }
         }
         for (entries, access) in [
             (&sandbox.read, Access::Read),
@@ -408,13 +572,7 @@ impl Builder {
                     p.canonicalize()
                         .map_err(|e| format!("{}: {e}", p.display()))
                 }) {
-                    Ok(path) => self.policy.grant(Grant {
-                        file: !path.is_dir(),
-                        path,
-                        access,
-                        pin: false,
-                        source: source.clone(),
-                    }),
+                    Ok(path) => self.grant(path, access, source.clone()),
                     Err(e) => self.warn(&source, raw, &e),
                 }
             }
@@ -435,7 +593,7 @@ impl Builder {
         for (key, value) in &sandbox.env {
             match self.vars.expand(value, &layer.dir) {
                 Ok(value) => {
-                    if key == "CLAUDE_CONFIG_DIR" {
+                    if key == CLAUDE_CONFIG_DIR {
                         self.claude_config_layer = Some((source.clone(), layer.origin));
                     }
                     self.policy.env.insert(key.clone(), value);
@@ -535,6 +693,7 @@ mod tests {
                 state: home.join("state"),
                 runtime: home.join("run"),
                 claude_config: None,
+                orca: None,
             };
             fs::create_dir_all(&dirs.config).unwrap();
             fs::write(dirs.global_config(), global).unwrap();
@@ -786,6 +945,122 @@ mod tests {
             f.resolve("repo", Some("pi")).unwrap().nono.herdr,
             Some(false)
         );
+    }
+
+    #[test]
+    fn orca_hook_grants_never_cover_home_and_note_only_what_is_granted() {
+        let mut f = Fixture::new("");
+        fs::create_dir_all(f.home.join("repo/.git")).unwrap();
+        fs::create_dir_all(f.home.join(".orca")).unwrap();
+        std::os::unix::fs::symlink(&f.home, f.home.join(".orca/agent-hooks")).unwrap();
+        f.dirs.orca = Some(orca::Pane {
+            scripts: f.home.join(".orca/agent-hooks"),
+            port: Some(4000),
+            ..orca::Pane::default()
+        });
+        f.write(
+            &format!("repo/{LOCAL_FILE}"),
+            "[sandbox]\nnetwork = \"block\"",
+        );
+        let r = f.resolve("repo", None).unwrap();
+        assert!(!r.policy.grants.iter().any(|g| g.path == f.home));
+        assert!(r.notes.is_empty(), "{:?}", r.notes);
+        assert_eq!(r.policy.open_ports, Vec::<u16>::new());
+
+        fs::remove_file(f.home.join(".orca/agent-hooks")).unwrap();
+        fs::create_dir_all(f.home.join(".orca/agent-hooks")).unwrap();
+        let r = f.resolve("repo", None).unwrap();
+        assert!(r.notes.iter().any(|n| n.contains("Orca's hook scripts")));
+        assert_eq!(r.policy.open_ports, [4000]);
+    }
+
+    #[test]
+    fn orca_cli_only_from_global_config() {
+        let f = Fixture::new("");
+        fs::create_dir_all(f.home.join("repo/.git")).unwrap();
+        f.write(
+            &format!("repo/{PROJECT_FILE}"),
+            "[sandbox]\norca_cli = true",
+        );
+        f.write(
+            &format!("repo/{LOCAL_FILE}"),
+            "[profiles.cli.sandbox]\norca_cli = true",
+        );
+        let r = f.resolve_profiles("repo", None, &["cli"]).unwrap();
+        assert_eq!(
+            r.warnings
+                .iter()
+                .filter(|w| w.contains("ignoring `orca_cli`"))
+                .count(),
+            2,
+            "{:?}",
+            r.warnings
+        );
+
+        let f = Fixture::new("[profiles.cli.sandbox]\norca_cli = true");
+        fs::create_dir_all(f.home.join("repo/.git")).unwrap();
+        let r = f.resolve_profiles("repo", None, &["cli"]).unwrap();
+        assert!(!r.warnings.iter().any(|w| w.contains("orca_cli")));
+    }
+
+    #[test]
+    fn orca_account_yields_to_config_and_applies_to_claude_only() {
+        let mut f = Fixture::new("");
+        fs::create_dir_all(f.home.join("repo/.git")).unwrap();
+        fs::create_dir_all(f.home.join(".orca/agent-hooks")).unwrap();
+        let account = f.home.join("orca/b");
+        f.dirs.orca = Some(orca::Pane {
+            scripts: f.home.join(".orca/agent-hooks"),
+            claude_account: orca::Account::Dir(account.clone()),
+            ..orca::Pane::default()
+        });
+        let hooks = (".orca/agent-hooks", Access::Read);
+
+        let missing = f.resolve("repo", None).unwrap();
+        let blocker = missing.blocker.unwrap();
+        assert!(blocker.contains("is missing"), "{blocker}");
+        assert!(!missing.policy.env.contains_key("CLAUDE_CONFIG_DIR"));
+        assert!(!account.exists());
+        fs::create_dir_all(&account).unwrap();
+
+        let r = f.resolve("repo", None).unwrap();
+        assert_eq!(r.blocker, None);
+        assert!(
+            r.notes
+                .iter()
+                .any(|n| n.contains("account selected in Orca"))
+        );
+        assert_eq!(r.policy.env["CLAUDE_CONFIG_DIR"], account.to_str().unwrap());
+        assert!(r.policy.grants.iter().any(|g| g.path == account
+            && g.access == Access::ReadWrite
+            && g.source == Source::Builtin("Orca account")));
+        assert!(r.policy.grants.iter().any(|g| g.path.ends_with(hooks.0)
+            && g.access == hooks.1
+            && g.source == Source::Builtin("Orca hook scripts")));
+
+        let pi = f.resolve("repo", Some("pi")).unwrap();
+        assert!(pi.policy.env.is_empty());
+        assert!(pi.policy.grants.iter().any(|g| g.path.ends_with(hooks.0)));
+
+        f.write(
+            &format!("repo/{LOCAL_FILE}"),
+            "[sandbox]\nenv = { CLAUDE_CONFIG_DIR = \"${home}/mine\" }",
+        );
+        fs::create_dir_all(f.home.join("mine")).unwrap();
+        let r = f.resolve("repo", None).unwrap();
+        assert_eq!(
+            r.policy.env["CLAUDE_CONFIG_DIR"],
+            f.home.join("mine").to_str().unwrap()
+        );
+        assert!(!r.policy.grants.iter().any(|g| g.path == account));
+        fs::remove_file(f.home.join(format!("repo/{LOCAL_FILE}"))).unwrap();
+
+        f.dirs.orca.as_mut().unwrap().claude_account = orca::Account::Invalid("bad".into());
+        assert_eq!(
+            f.resolve("repo", None).unwrap().blocker.as_deref(),
+            Some("bad")
+        );
+        assert_eq!(f.resolve("repo", Some("pi")).unwrap().blocker, None);
     }
 
     #[test]

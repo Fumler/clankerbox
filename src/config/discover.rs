@@ -223,6 +223,7 @@ mod tests {
             state: home.join(".local/state/clankerbox"),
             runtime: home.join("run"),
             claude_config: None,
+            orca: None,
         }
     }
 

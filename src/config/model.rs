@@ -86,6 +86,14 @@ pub struct SandboxConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_args: Vec<String>,
 
+    /// In an Orca (<https://github.com/stablyai/orca>) terminal, let Orca's status hooks report
+    /// the agent (read-only access to Orca's hook scripts and endpoint), and run Claude Code
+    /// with the account selected in Orca. Defaults to true.
+    pub orca: Option<bool>,
+    /// In an Orca terminal, let the agent use the `orca` CLI. Its socket can control every Orca
+    /// terminal, including unsandboxed shells. Global config only. Defaults to false.
+    pub orca_cli: Option<bool>,
+
     /// Options for the nono backend.
     #[serde(default)]
     pub nono: NonoConfig,

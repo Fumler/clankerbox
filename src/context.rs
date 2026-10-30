@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use crate::orca;
+
 /// XDG base directories on every platform, including macOS, so dotfiles stay portable.
 #[derive(Debug, Clone)]
 pub struct Dirs {
@@ -14,6 +16,7 @@ pub struct Dirs {
     pub runtime: PathBuf,
     /// `$CLAUDE_CONFIG_DIR`.
     pub claude_config: Option<PathBuf>,
+    pub orca: Option<orca::Pane>,
 }
 
 impl Dirs {
@@ -41,6 +44,7 @@ impl Dirs {
             state: xdg("XDG_STATE_HOME", ".local/state"),
             runtime,
             claude_config: env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from),
+            orca: orca::detect(|name| env::var(name).ok(), &home),
             home,
         })
     }

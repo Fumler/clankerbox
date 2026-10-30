@@ -65,6 +65,11 @@ pub struct Policy {
     pub open_ports: Vec<u16>,
     pub listen_ports: Vec<u16>,
     pub env: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub env_remove: Vec<String>,
+    /// Unix sockets the agent may connect to.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sockets: Vec<PathBuf>,
     /// From config files; command-line passthrough is kept separately in `Request`.
     pub extra_args: Vec<String>,
 }
@@ -77,6 +82,8 @@ impl Default for Policy {
             open_ports: Vec::new(),
             listen_ports: Vec::new(),
             env: BTreeMap::new(),
+            env_remove: Vec::new(),
+            sockets: Vec::new(),
             extra_args: Vec::new(),
         }
     }

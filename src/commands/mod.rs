@@ -112,6 +112,16 @@ impl Session {
     }
 }
 
+/// Everything a run adds besides grants, for the trust prompt and `cb show`.
+pub fn notes(backend: &dyn Sandbox, resolved: &Resolved) -> Vec<String> {
+    let mut notes = backend.notes();
+    // They describe sandbox access, which doesn't exist without one.
+    if resolved.sandboxed() {
+        notes.extend(resolved.notes.iter().cloned());
+    }
+    notes
+}
+
 /// Lists write grants to shared caches, which unsandboxed builds also use.
 /// Empty without cache grants.
 pub fn cache_grants_text(toolchains: &[&Toolchain], session: &Session, hint: &str) -> String {
