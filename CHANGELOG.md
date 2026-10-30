@@ -4,6 +4,21 @@ All notable changes to this project are documented here. The format follows
 [Conventional Commits](https://www.conventionalcommits.org) and versions follow
 [Semantic Versioning](https://semver.org).
 
+## [2.2.0] - 2026-10-30
+
+### Features
+
+- Support Orca terminals
+
+### Documentation
+
+- Restructure README and split reference into docs/ [skip ci]
+- **claude:** Require docs updates and keep them concise [skip ci]
+- **claude:** Note [skip ci] for commits that don't change cb [skip ci]
+
+### Miscellaneous
+
+- Run CodeQL weekly and on PRs, and limit CI token to read
 ## [2.1.0] - 2026-10-29
 
 ### Features
